@@ -1,6 +1,70 @@
-# Kernel In-Context Learning
+# Kernel-ICL: In-Context Learning for Probability Distributions
 
-This repository investigates whether Transformers can learn kernelized functions in-context, with a focus on RBF kernels approximated using Random Fourier Features (RFF).
+This repository contains an implementation of a transformer-based model for in-context learning (ICL) of probability distributions.
+
+## Configuration-Based Training and Evaluation
+
+Training and evaluation are based on configuration files located in the `configs/` directory. This allows for better reproducibility and easier experimentation.
+
+### Available Configurations
+
+- `configs/default.yaml`: Default configuration
+- `configs/gaussian.yaml`: Configuration for Gaussian distribution tasks
+- `configs/gamma.yaml`: Configuration for Gamma distribution tasks (more complex)
+
+### Training
+
+To train a model using a specific configuration file:
+
+```bash
+python src/train.py --config configs/gaussian.yaml
+```
+
+You can override the task name while keeping other configuration options:
+
+```bash
+python src/train.py --config configs/gaussian.yaml --task_name poisson
+```
+
+### Evaluation
+
+To evaluate a trained model:
+
+```bash
+python src/eval.py --config configs/gaussian.yaml --model_path outputs/[timestamp]/best_model.pt
+```
+
+You can evaluate on a different task than what the model was trained on:
+
+```bash
+python src/eval.py --config configs/gaussian.yaml --model_path outputs/[timestamp]/best_model.pt --task_name exponential
+```
+
+## Available Tasks
+
+- `gaussian`: Gaussian distribution
+- `poisson`: Poisson distribution
+- `bernoulli`: Bernoulli distribution
+- `exponential`: Exponential distribution
+- `gamma`: Gamma distribution
+
+## Model Architecture
+
+The model uses a transformer architecture based on GPT-2 to perform in-context learning. The key components are:
+
+1. Input embeddings to project the input-output pairs to a higher-dimensional space
+2. Positional encoding to maintain sequence order
+3. Transformer layers for contextual processing
+4. Output projection to produce distribution parameter predictions
+
+## Evaluating In-Context Learning Performance
+
+The evaluation compares the transformer model against several baselines:
+- 1-NN: 1-nearest neighbor
+- 3-NN: 3-nearest neighbors
+- Averaging: Simple averaging of previous outputs
+
+Results are summarized and visualized to show how the model improves with more context examples.
 
 ## 📊 Research Question
 

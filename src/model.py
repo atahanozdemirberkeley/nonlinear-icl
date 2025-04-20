@@ -10,7 +10,7 @@ class PositionalEncoding(nn.Module):
     Positional encoding for the transformer models.
     Based on the Transformer paper's sinusoidal encoding.
     """
-    def __init__(self, d_model, max_len=100):
+    def __init__(self, d_model, max_len=512):
         super().__init__()
         position = torch.arange(max_len).unsqueeze(1).float()
         div_term = torch.exp(torch.arange(0, d_model, 2).float() * (-torch.log(torch.tensor(10000.0)) / d_model))
@@ -47,123 +47,57 @@ class FourierFeatureProjection(nn.Module):
         return torch.cat([torch.sin(projection), torch.cos(projection)], dim=-1)
 
 
-class ICLTransformer(nn.Module):
+class GregTransformer(nn.Module):
     """
-    In-Context Learning Transformer model with Fourier feature enhancement.
-    
-    Args:
-        d_token (int): Dimension of the token (input_dim + 1)
-        d_model (int): Model dimension
-        n_layers (int): Number of transformer layers
-        n_heads (int): Number of attention heads
+    Exact implementation of the TransformerModel from Greg Yang's in-context-learning repository.
     """
-    def __init__(self, d_token, d_model=256, n_layers=4, n_heads=4, dropout=0.1):
-        super().__init__()
-        self.d_token = d_token
-        self.d_model = d_model
-        
-        # Optional Fourier feature projection for input - helps with RBF approximation
-        self.fourier_proj = FourierFeatureProjection(d_token, d_model*2)
-        
-        # Input projection (after Fourier features)
-        self.input_proj = nn.Sequential(
-            nn.Linear(d_model*2, d_model),
-            nn.LayerNorm(d_model)
+    def __init__(self, n_dims, n_positions, n_embd=128, n_layer=12, n_head=4):
+        super(GregTransformer, self).__init__()
+        configuration = GPT2Config(
+            n_positions=2 * n_positions,
+            n_embd=n_embd,
+            n_layer=n_layer,
+            n_head=n_head,
+            resid_pdrop=0.0,
+            embd_pdrop=0.0,
+            attn_pdrop=0.0,
+            use_cache=False,
         )
-        
-        # Add positional encoding
-        self.pos_encoder = PositionalEncoding(d_model)
-        
-        # Dropout for regularization
-        self.dropout = nn.Dropout(dropout)
-        
-        # GPT-2 configuration
-        config = GPT2Config(
-            vocab_size=1,  # Not used for continuous inputs
-            n_positions=128,  # Maximum context length (increased)
-            n_embd=d_model,
-            n_layer=n_layers,
-            n_head=n_heads,
-            activation_function="gelu_new",  # Better activation
-            resid_pdrop=dropout,
-            embd_pdrop=dropout,
-            attn_pdrop=dropout,
-            use_cache=True,
-            scale_attn_weights=True
+        self.name = f"gpt2_embd={n_embd}_layer={n_layer}_head={n_head}"
+
+        self.n_positions = n_positions
+        self.n_dims = n_dims
+        self._read_in = nn.Linear(n_dims, n_embd)
+        self._backbone = GPT2Model(configuration)
+        self._read_out = nn.Linear(n_embd, 1)
+
+    @staticmethod
+    def _combine(xs_b, ys_b):
+        """Interleaves the x's and the y's into a single sequence."""
+        bsize, points, dim = xs_b.shape
+        ys_b_wide = torch.cat(
+            (
+                ys_b.view(bsize, points, 1),
+                torch.zeros(bsize, points, dim - 1, device=ys_b.device),
+            ),
+            axis=2,
         )
-        
-        # GPT-2 model backbone
-        self.transformer = GPT2Model(config)
-        
-        # Output network with layer normalization and multiple layers - designed for kernel approximation
-        self.output_net = nn.Sequential(
-            nn.LayerNorm(d_model),
-            nn.Linear(d_model, d_model),
-            nn.GELU(),
-            nn.Dropout(dropout),
-            nn.Linear(d_model, d_model // 2),
-            nn.GELU(),
-            nn.Dropout(dropout/2),
-            nn.Linear(d_model // 2, 1)
-        )
-        
-        # Initialize all weights properly
-        self.apply(self._init_weights)
-    
-    def _init_weights(self, module):
-        """Initialize weights with appropriate scales"""
-        if isinstance(module, nn.Linear):
-            torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
-            if module.bias is not None:
-                torch.nn.init.zeros_(module.bias)
-        elif isinstance(module, nn.LayerNorm):
-            module.bias.data.zero_()
-            module.weight.data.fill_(1.0)
-        
-    def forward(self, prompt_seq):
-        """
-        Forward pass through the model.
-        
-        Args:
-            prompt_seq (torch.Tensor): Input sequence of shape [batch_size, seq_len, d_token]
-            
-        Returns:
-            torch.Tensor: Predictions of shape [batch_size]
-        """
-        batch_size, seq_len, _ = prompt_seq.shape
-        
-        # Apply Fourier feature projection first
-        h = self.fourier_proj(prompt_seq)
-        
-        # Project to model dimension
-        h = self.input_proj(h)
-        
-        # Apply positional encoding
-        h = self.pos_encoder(h)
-        
-        # Apply dropout
-        h = self.dropout(h)
-        
-        # Create attention mask (allows each position to attend to all prior positions)
-        attention_mask = torch.ones(batch_size, seq_len).to(prompt_seq.device)
-        
-        # Forward pass through transformer
-        outputs = self.transformer(
-            inputs_embeds=h,
-            attention_mask=attention_mask
-        )
-        
-        # Get hidden states
-        hidden_states = outputs.last_hidden_state
-        
-        # Project to output using more sophisticated output network
-        # Get the representation at the last position (query position)
-        query_hidden = hidden_states[:, -1]
-        
-        # Project to scalar output
-        prediction = self.output_net(query_hidden).squeeze(-1)
-        
-        return prediction
+        zs = torch.stack((xs_b, ys_b_wide), dim=2)
+        zs = zs.view(bsize, 2 * points, dim)
+        return zs
+
+    def forward(self, xs, ys, inds=None):
+        if inds is None:
+            inds = torch.arange(ys.shape[1])
+        else:
+            inds = torch.tensor(inds)
+            if max(inds) >= ys.shape[1] or min(inds) < 0:
+                raise ValueError("inds contain indices where xs and ys are not defined")
+        zs = self._combine(xs, ys)
+        embeds = self._read_in(zs)
+        output = self._backbone(inputs_embeds=embeds).last_hidden_state
+        prediction = self._read_out(output)
+        return prediction[:, ::2, 0][:, inds]  # predict only on xs
 
 
 class SimpleICLTransformer(nn.Module):
