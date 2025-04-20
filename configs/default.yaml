@@ -1,0 +1,28 @@
+# configs/default.yaml
+model:
+  n_dims: 10
+  n_positions: 100
+  n_embd: 512
+  n_layer: 8
+  n_head: 16
+
+training:
+  batch_size: 32
+  learning_rate: 0.00005
+  train_steps: 20000
+  eval_every: 500
+  save_every: 1000
+
+task:
+  task_name: rff
+  input_dim: 1
+  rff_dim: 20
+  sigma: 3.0
+  context_length: 20
+
+logging:
+  use_wandb: false
+  project_name: kernel-icl
+  log_every: 100
+
+output_dir: outputs

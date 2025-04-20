@@ -1,0 +1,23 @@
+logging:
+  log_every: 100
+  project_name: kernel-icl
+  use_wandb: false
+model:
+  n_dims: 10
+  n_embd: 128
+  n_head: 4
+  n_layer: 4
+  n_positions: 100
+output_dir: outputs
+task:
+  context_length: 10
+  input_dim: 10
+  rff_dim: 100
+  sigma: 0.5
+  task_name: rff
+training:
+  batch_size: 32
+  eval_every: 500
+  learning_rate: 0.0001
+  save_every: 1000
+  train_steps: 10000
