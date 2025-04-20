@@ -8,10 +8,11 @@ import json
 from tqdm import tqdm
 import torch.nn as nn
 
-from model import GregTransformer
+from model import ICLModel  # Changed from GregTransformer to ICLModel
 from tasks import get_task
 from data_generator import generate_samples_for_task
 from config import Config
+from train import create_prompt_sequence  # Import create_prompt_sequence function
 
 def set_seed(seed):
     """Set random seed for reproducibility"""
@@ -109,10 +110,10 @@ class AveragingBaseline:
         
         return predictions
 
-def evaluate_model(model, task_name, n_dims, batch_size, n_positions, task_scale=0.25, n_runs=10, device="cuda", baselines=None):
+def evaluate_model(model, task_name, n_dims, batch_size, n_positions, task_scale=0.25, n_runs=10, device="cuda", baselines=None, config=None):
     """
     Evaluate the model on a specific task with varying numbers of context examples.
-    This follows Greg Yang's evaluation approach as closely as possible.
+    This follows Greg Yang's evaluation approach.
     
     Args:
         model: Trained model
@@ -124,6 +125,7 @@ def evaluate_model(model, task_name, n_dims, batch_size, n_positions, task_scale
         n_runs: Number of evaluation runs
         device: Device to use
         baselines: List of baseline models to compare against
+        config: Configuration object
         
     Returns:
         Dictionary of evaluation metrics
@@ -148,19 +150,41 @@ def evaluate_model(model, task_name, n_dims, batch_size, n_positions, task_scale
     batch_offset = 0
     for run in tqdm(range(n_runs), desc="Evaluation runs"):
         # Create task with the same scale as training
-        task = get_task(task_name, n_dims, batch_size, scale=task_scale)
+        task = get_task(task_name, n_dims, batch_size=batch_size, scale=task_scale)
         
         # Generate samples
-        xs = generate_samples_for_task(task, n_positions, n_dims, batch_size, device)
-        ys = task.evaluate(xs)
+        xs, ys = task.sample(batch_size, n_positions)
+        xs, ys = xs.to(device), ys.to(device)
         
         # Evaluate transformer for all points
         with torch.no_grad():
             # Get predictions for all positions
-            all_preds = model(xs, ys)
+            all_transformer_preds = []
+            
+            # For each context length (0 to n_positions-1), get prediction for position i
+            for i in range(n_positions):
+                if i == 0:
+                    # No context, predict 0
+                    pred_i = torch.zeros(batch_size, device=device)
+                else:
+                    # Use context up to position i
+                    xs_i = xs[:, :i+1]
+                    ys_i = ys[:, :i+1]
+                    
+                    # Create prompt sequence
+                    prompt_seq = create_prompt_sequence(xs_i, ys_i, config)
+                    
+                    # Get prediction for position i
+                    pred_i = model(prompt_seq)[:, i]
+                
+                # Store prediction
+                all_transformer_preds.append(pred_i)
+            
+            # Stack predictions [batch_size, n_positions]
+            transformer_preds = torch.stack(all_transformer_preds, dim=1)
             
             # Calculate MSE for each point
-            point_wise_metrics = ((all_preds - ys.unsqueeze(-1)) ** 2).squeeze(-1).cpu()
+            point_wise_metrics = ((transformer_preds - ys) ** 2).cpu()
             
             # Store results
             all_transformer_metrics[batch_offset:batch_offset+batch_size, :] = point_wise_metrics
@@ -176,31 +200,33 @@ def evaluate_model(model, task_name, n_dims, batch_size, n_positions, task_scale
         
         batch_offset += batch_size
     
-    # Calculate metrics using Greg Yang's aggregation function
+    # Calculate metrics
     results = {}
-    results["transformer"] = aggregate_metrics(all_transformer_metrics)
     
+    # Transformer metrics
+    mean_errors = all_transformer_metrics.mean(dim=0)
+    std_errors = all_transformer_metrics.std(dim=0) / torch.sqrt(torch.tensor(all_transformer_metrics.size(0)))
+    
+    results["transformer"] = {
+        "average_mse": mean_errors.mean().item(),
+        "mean_error_by_context": mean_errors.tolist(),
+        "std_error_by_context": std_errors.tolist(),
+        "few_shot_mse": mean_errors[1:6].mean().item() if len(mean_errors) > 5 else float('nan'),
+        "many_shot_mse": mean_errors[6:].mean().item() if len(mean_errors) > 6 else float('nan'),
+    }
+    
+    # Baseline metrics
     for baseline in baselines:
-        results[baseline.name] = aggregate_metrics(baseline_metrics[baseline.name])
-    
-    return results
-
-def aggregate_metrics(metrics, bootstrap_trials=1000):
-    """
-    Aggregates metrics following Greg Yang's approach.
-    Takes a tensor of shape [n_samples, n_points] and returns statistics.
-    """
-    results = {}
-    results["mean_error_by_context"] = metrics.mean(dim=0).tolist()
-    results["std_error_by_context"] = metrics.std(dim=0, unbiased=True).tolist()
-    
-    # Calculate bootstrap confidence intervals
-    n = len(metrics)
-    bootstrap_indices = torch.randint(n, size=(bootstrap_trials, n))
-    bootstrap_means = metrics[bootstrap_indices].mean(dim=1).sort(dim=0)[0]
-    
-    results["bootstrap_low"] = bootstrap_means[int(0.05 * bootstrap_trials), :].tolist()
-    results["bootstrap_high"] = bootstrap_means[int(0.95 * bootstrap_trials), :].tolist()
+        mean_errors = baseline_metrics[baseline.name].mean(dim=0)
+        std_errors = baseline_metrics[baseline.name].std(dim=0) / torch.sqrt(torch.tensor(baseline_metrics[baseline.name].size(0)))
+        
+        results[baseline.name] = {
+            "average_mse": mean_errors.mean().item(),
+            "mean_error_by_context": mean_errors.tolist(),
+            "std_error_by_context": std_errors.tolist(),
+            "few_shot_mse": mean_errors[1:6].mean().item() if len(mean_errors) > 5 else float('nan'),
+            "many_shot_mse": mean_errors[6:].mean().item() if len(mean_errors) > 6 else float('nan'),
+        }
     
     return results
 
@@ -217,15 +243,11 @@ def plot_learning_curves(results, output_dir):
     
     for model_name, data in results.items():
         mean_errors = data["mean_error_by_context"]
+        std_errors = data["std_error_by_context"]
         
-        # Get confidence intervals from bootstrap or standard error
-        if "bootstrap_low" in data and "bootstrap_high" in data:
-            low_errors = data["bootstrap_low"]
-            high_errors = data["bootstrap_high"]
-        else:
-            std_errors = data["std_error_by_context"]
-            low_errors = [m - s for m, s in zip(mean_errors, std_errors)]
-            high_errors = [m + s for m, s in zip(mean_errors, std_errors)]
+        # Calculate confidence intervals (mean ± std error)
+        low_errors = [m - s for m, s in zip(mean_errors, std_errors)]
+        high_errors = [m + s for m, s in zip(mean_errors, std_errors)]
         
         x = np.arange(len(mean_errors))
         plt.plot(x, mean_errors, label=model_name, linewidth=2)
@@ -251,15 +273,11 @@ def plot_learning_curves(results, output_dir):
     
     for model_name, data in results.items():
         mean_errors = data["mean_error_by_context"]
+        std_errors = data["std_error_by_context"]
         
-        # Get confidence intervals
-        if "bootstrap_low" in data and "bootstrap_high" in data:
-            low_errors = data["bootstrap_low"]
-            high_errors = data["bootstrap_high"]
-        else:
-            std_errors = data["std_error_by_context"]
-            low_errors = [m - s for m, s in zip(mean_errors, std_errors)]
-            high_errors = [m + s for m, s in zip(mean_errors, std_errors)]
+        # Calculate confidence intervals (mean ± std error)
+        low_errors = [m - s for m, s in zip(mean_errors, std_errors)]
+        high_errors = [m + s for m, s in zip(mean_errors, std_errors)]
         
         # Normalize by first error
         if mean_errors[0] > 0:
@@ -317,36 +335,35 @@ def main():
     # Load model checkpoint
     checkpoint = torch.load(args.model_path, map_location=device, weights_only=False)
     
-    # Get config from checkpoint if available
-    if 'config' in checkpoint:
-        checkpoint_config = checkpoint['config']
-        # Use model parameters from checkpoint config but task from current config
-        config.model = checkpoint_config.model
-        print("Using model configuration from checkpoint")
-    
-    print(f"Model configuration:")
-    print(f"  Task: {config.task.name}")
-    print(f"  Input dimensions: {config.model.n_dims}")
-    print(f"  Embedding dimension: {config.model.n_embd}")
-    print(f"  Layers: {config.model.n_layer}")
-    print(f"  Heads: {config.model.n_head}")
+    # Calculate d_token if not specified
+    if config.model.d_token is None:
+        config.model.d_token = config.model.n_dims + 1
+        print(f"Setting d_token to {config.model.d_token} (n_dims + 1)")
     
     # Initialize model with the correct parameters
-    model = GregTransformer(
-        n_dims=config.model.n_dims,
-        n_positions=config.model.n_positions, 
-        n_embd=config.model.n_embd,
-        n_layer=config.model.n_layer,
-        n_head=config.model.n_head
+    model = ICLModel(
+        d_token=config.model.d_token,
+        n_positions=config.model.n_positions,
+        d_model=config.model.d_model,
+        n_heads=config.model.n_heads,
+        kernel_type=config.model.kernel_type
     ).to(device)
     
     # Load model weights
     if 'model_state_dict' in checkpoint:
         model.load_state_dict(checkpoint['model_state_dict'])
+        print("Loaded model state from checkpoint")
     else:
         model.load_state_dict(checkpoint)
+        print("Loaded model weights directly")
     
     print(f"Loaded model from {args.model_path}")
+    print(f"Model configuration:")
+    print(f"  Task: {config.task.name}")
+    print(f"  Input dimensions: {config.model.n_dims}")
+    print(f"  Model dimensions: {config.model.d_model}")
+    print(f"  Layers: {config.model.n_layer}")
+    print(f"  Heads: {config.model.n_head}")
     
     # Evaluate model
     task_scale = getattr(config.task, 'task_scale', 0.25)  # Get task_scale or default to 0.25
@@ -358,7 +375,8 @@ def main():
         n_positions=config.model.n_positions,
         task_scale=task_scale,
         n_runs=args.n_runs,
-        device=device
+        device=device,
+        config=config  # Pass config to the evaluation function
     )
     
     # Save results

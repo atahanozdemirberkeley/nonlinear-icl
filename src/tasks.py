@@ -3,16 +3,65 @@ import math
 import numpy as np
 
 class Task:
-    def __init__(self, n_dims, batch_size):
+    def __init__(self, n_dims, batch_size, seed=None):
         self.n_dims = n_dims
         self.batch_size = batch_size
+        
+        # Set seed if provided
+        self.seed = seed
+        if seed is not None:
+            torch.manual_seed(seed)
 
     def evaluate(self, xs):
         raise NotImplementedError
 
+    def sample(self, batch_size, n_points, xs_seeds=None, ys_seeds=None):
+        """
+        Sample inputs and corresponding outputs.
+        
+        Args:
+            batch_size: Number of batches
+            n_points: Number of points per batch
+            xs_seeds: Optional list of seeds for input sampling
+            ys_seeds: Optional list of seeds for output sampling
+            
+        Returns:
+            xs: Input tensor [batch_size, n_points, n_dims]
+            ys: Output tensor [batch_size, n_points]
+        """
+        # Set temporary random states if seeds are provided
+        prev_state = None
+        if xs_seeds is not None:
+            assert len(xs_seeds) == batch_size, "Number of seeds must match batch size"
+            prev_state = torch.get_rng_state()
+            
+        # Sample input points
+        xs = torch.randn(batch_size, n_points, self.n_dims)
+        
+        # Reset random state if we changed it
+        if prev_state is not None:
+            torch.set_rng_state(prev_state)
+        
+        # Set seed for outputs if provided
+        if ys_seeds is not None:
+            assert len(ys_seeds) == batch_size, "Number of seeds must match batch size"
+            prev_state = torch.get_rng_state()
+            for i, seed in enumerate(ys_seeds):
+                torch.manual_seed(seed)
+                # This is required for some generators that need randomness
+                
+        # Get outputs from task
+        ys = self.evaluate(xs)
+        
+        # Reset random state if we changed it
+        if prev_state is not None:
+            torch.set_rng_state(prev_state)
+            
+        return xs, ys
+
 class LinearRegression(Task):
-    def __init__(self, n_dims, batch_size, scale=1):
-        super().__init__(n_dims, batch_size)
+    def __init__(self, n_dims, batch_size, scale=1, seed=None):
+        super().__init__(n_dims, batch_size, seed=seed)
         self.scale = scale
         self.w = torch.randn(batch_size, n_dims, 1) * scale
 
@@ -21,8 +70,8 @@ class LinearRegression(Task):
         return (xs @ w)[:, :, 0]
 
 class QuadraticRegression(Task):
-    def __init__(self, n_dims, batch_size, scale=1):
-        super().__init__(n_dims, batch_size)
+    def __init__(self, n_dims, batch_size, scale=1, seed=None):
+        super().__init__(n_dims, batch_size, seed=seed)
         self.scale = scale
         self.w1 = torch.randn(batch_size, n_dims, 1) * scale
         self.w2 = torch.randn(batch_size, n_dims, 1) * scale
@@ -33,8 +82,8 @@ class QuadraticRegression(Task):
         return (xs @ w1)[:, :, 0] + (xs ** 2 @ w2)[:, :, 0]
 
 class ReLUNetwork(Task):
-    def __init__(self, n_dims, batch_size, hidden_size=100, scale=1):
-        super().__init__(n_dims, batch_size)
+    def __init__(self, n_dims, batch_size, hidden_size=100, scale=1, seed=None):
+        super().__init__(n_dims, batch_size, seed=seed)
         self.scale = scale
         self.hidden_size = hidden_size
         self.w1 = torch.randn(batch_size, n_dims, hidden_size) * scale
@@ -47,8 +96,8 @@ class ReLUNetwork(Task):
         return (hidden @ w2)[:, :, 0]
 
 class GaussianDistribution(Task):
-    def __init__(self, n_dims, batch_size, scale=1.0):
-        super().__init__(n_dims, batch_size)
+    def __init__(self, n_dims, batch_size, scale=1.0, seed=None):
+        super().__init__(n_dims, batch_size, seed=seed)
         self.scale = scale
         # Create random weights for linear function that determines mean
         self.w = torch.randn(batch_size, n_dims) * scale
@@ -74,8 +123,8 @@ class GaussianDistribution(Task):
         return samples
 
 class PoissonDistribution(Task):
-    def __init__(self, n_dims, batch_size, scale=1.0):
-        super().__init__(n_dims, batch_size)
+    def __init__(self, n_dims, batch_size, scale=1.0, seed=None):
+        super().__init__(n_dims, batch_size, seed=seed)
         self.scale = scale
         # Create random weights for linear function that determines lambda
         self.w = torch.randn(batch_size, n_dims) * scale
@@ -100,8 +149,8 @@ class PoissonDistribution(Task):
         return samples
 
 class BernoulliDistribution(Task):
-    def __init__(self, n_dims, batch_size, scale=1.0):
-        super().__init__(n_dims, batch_size)
+    def __init__(self, n_dims, batch_size, scale=1.0, seed=None):
+        super().__init__(n_dims, batch_size, seed=seed)
         self.scale = scale
         # Create random weights for linear function that determines probability
         self.w = torch.randn(batch_size, n_dims) * scale
@@ -124,8 +173,8 @@ class BernoulliDistribution(Task):
         return samples
 
 class ExponentialDistribution(Task):
-    def __init__(self, n_dims, batch_size, scale=1.0):
-        super().__init__(n_dims, batch_size)
+    def __init__(self, n_dims, batch_size, scale=1.0, seed=None):
+        super().__init__(n_dims, batch_size, seed=seed)
         self.scale = scale
         # Create random weights for linear function that determines rate
         self.w = torch.randn(batch_size, n_dims) * scale
@@ -149,8 +198,8 @@ class ExponentialDistribution(Task):
         return samples
 
 class GammaDistribution(Task):
-    def __init__(self, n_dims, batch_size, scale=1.0):
-        super().__init__(n_dims, batch_size)
+    def __init__(self, n_dims, batch_size, scale=1.0, seed=None):
+        super().__init__(n_dims, batch_size, seed=seed)
         self.scale = scale
         # Create random weights for linear functions that determine shape and rate
         self.w_shape = torch.randn(batch_size, n_dims) * scale

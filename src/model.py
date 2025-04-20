@@ -4,6 +4,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from transformers import GPT2Config, GPT2Model
 from copy import deepcopy
+import math
 
 class PositionalEncoding(nn.Module):
     """
@@ -49,55 +50,181 @@ class FourierFeatureProjection(nn.Module):
 
 class GregTransformer(nn.Module):
     """
-    Exact implementation of the TransformerModel from Greg Yang's in-context-learning repository.
+    Transformer model based on Greg Yang's architecture.
     """
-    def __init__(self, n_dims, n_positions, n_embd=128, n_layer=12, n_head=4):
-        super(GregTransformer, self).__init__()
-        configuration = GPT2Config(
-            n_positions=2 * n_positions,
-            n_embd=n_embd,
-            n_layer=n_layer,
-            n_head=n_head,
-            resid_pdrop=0.0,
-            embd_pdrop=0.0,
-            attn_pdrop=0.0,
-            use_cache=False,
-        )
-        self.name = f"gpt2_embd={n_embd}_layer={n_layer}_head={n_head}"
-
+    def __init__(self, d_model, n_positions, n_heads=4, kernel_type='relu'):
+        super().__init__()
+        self.d_model = d_model
         self.n_positions = n_positions
-        self.n_dims = n_dims
-        self._read_in = nn.Linear(n_dims, n_embd)
-        self._backbone = GPT2Model(configuration)
-        self._read_out = nn.Linear(n_embd, 1)
-
-    @staticmethod
-    def _combine(xs_b, ys_b):
-        """Interleaves the x's and the y's into a single sequence."""
-        bsize, points, dim = xs_b.shape
-        ys_b_wide = torch.cat(
-            (
-                ys_b.view(bsize, points, 1),
-                torch.zeros(bsize, points, dim - 1, device=ys_b.device),
-            ),
-            axis=2,
+        self.n_heads = n_heads
+        self.kernel_type = kernel_type
+        
+        # Define head dimension
+        self.head_dim = d_model // n_heads
+        assert self.head_dim * n_heads == d_model, "d_model must be divisible by n_heads"
+        
+        # Query, key, value projections
+        self.q_proj = nn.Linear(d_model, d_model)
+        self.k_proj = nn.Linear(d_model, d_model)
+        self.v_proj = nn.Linear(d_model, d_model)
+        
+        # Output projection
+        self.output_proj = nn.Linear(d_model, d_model)
+        
+        # Layer normalization
+        self.norm1 = nn.LayerNorm(d_model)
+        self.norm2 = nn.LayerNorm(d_model)
+        
+        # Feed-forward network
+        self.ffn = nn.Sequential(
+            nn.Linear(d_model, 4 * d_model),
+            nn.GELU(),
+            nn.Linear(4 * d_model, d_model)
         )
-        zs = torch.stack((xs_b, ys_b_wide), dim=2)
-        zs = zs.view(bsize, 2 * points, dim)
-        return zs
-
-    def forward(self, xs, ys, inds=None):
-        if inds is None:
-            inds = torch.arange(ys.shape[1])
+        
+        # Create attention mask (causal/triangular)
+        mask = torch.tril(torch.ones(n_positions, n_positions))
+        self.register_buffer("mask", mask.view(1, 1, n_positions, n_positions))
+    
+    def _compute_kernel_function(self, scores):
+        """Apply the specified kernel function to attention scores."""
+        if self.kernel_type == 'relu':
+            return torch.relu(scores)
+        elif self.kernel_type == 'gelu':
+            return nn.functional.gelu(scores)
+        elif self.kernel_type == 'softmax':
+            return torch.nn.functional.softmax(scores, dim=-1)
         else:
-            inds = torch.tensor(inds)
-            if max(inds) >= ys.shape[1] or min(inds) < 0:
-                raise ValueError("inds contain indices where xs and ys are not defined")
-        zs = self._combine(xs, ys)
-        embeds = self._read_in(zs)
-        output = self._backbone(inputs_embeds=embeds).last_hidden_state
-        prediction = self._read_out(output)
-        return prediction[:, ::2, 0][:, inds]  # predict only on xs
+            raise ValueError(f"Unknown kernel type: {self.kernel_type}")
+    
+    def forward(self, x, inds=None):
+        """
+        Args:
+            x: Input tensor of shape [batch_size, n_positions, d_model]
+            inds: Optional indices to compute self-attention for specific positions
+                  If None, compute self-attention for all positions
+        """
+        batch_size, seq_len, _ = x.shape
+        
+        # Compute specific positions or all
+        if inds is not None:
+            # Only compute self-attention for specific positions
+            positions_to_compute = inds
+        else:
+            # Compute for all positions
+            positions_to_compute = list(range(seq_len))
+        
+        # First residual block: self-attention
+        residual = x
+        x = self.norm1(x)
+        
+        # Multi-head self-attention
+        q = self.q_proj(x).view(batch_size, seq_len, self.n_heads, self.head_dim).transpose(1, 2)
+        k = self.k_proj(x).view(batch_size, seq_len, self.n_heads, self.head_dim).transpose(1, 2)
+        v = self.v_proj(x).view(batch_size, seq_len, self.n_heads, self.head_dim).transpose(1, 2)
+        
+        # Compute attention scores
+        scores = torch.matmul(q, k.transpose(-2, -1)) / math.sqrt(self.head_dim)
+        
+        # Apply causal mask
+        mask = self.mask[:, :, :seq_len, :seq_len]
+        scores = scores.masked_fill(mask == 0, float('-inf'))
+        
+        # Apply kernel function
+        attn_weights = self._compute_kernel_function(scores)
+        
+        # Compute weighted sum
+        context = torch.matmul(attn_weights, v)
+        context = context.transpose(1, 2).contiguous().view(batch_size, seq_len, self.d_model)
+        
+        # Project back to d_model dimension
+        context = self.output_proj(context)
+        
+        # Add residual connection
+        x = residual + context
+        
+        # Second residual block: feed-forward
+        residual = x
+        x = self.norm2(x)
+        x = self.ffn(x)
+        x = residual + x
+        
+        # If indices were provided, only return those positions
+        if inds is not None:
+            return x[:, inds, :]
+        
+        return x
+
+
+class ICLModel(nn.Module):
+    """
+    In-context learning model based on Greg Yang's approach.
+    """
+    def __init__(self, d_token, n_positions, d_model=128, n_heads=4, kernel_type='relu'):
+        super().__init__()
+        self.d_token = d_token
+        self.n_positions = n_positions
+        self.d_model = d_model
+        self.n_heads = n_heads
+        self.kernel_type = kernel_type
+        
+        # Input projection
+        self.input_proj = nn.Linear(d_token, d_model)
+        
+        # Position embedding
+        self.pos_embedding = nn.Parameter(torch.zeros(1, n_positions, d_model))
+        
+        # Transformer layers
+        self.transformer = GregTransformer(
+            d_model=d_model,
+            n_positions=n_positions,
+            n_heads=n_heads,
+            kernel_type=kernel_type
+        )
+        
+        # Output projection (to scalar prediction)
+        self.output_proj = nn.Linear(d_model, 1)
+        
+        self._init_weights()
+    
+    def _init_weights(self):
+        """Initialize model weights."""
+        nn.init.normal_(self.pos_embedding, std=0.02)
+        
+        # Initialize linear layers
+        nn.init.normal_(self.input_proj.weight, std=0.02)
+        nn.init.zeros_(self.input_proj.bias)
+        nn.init.normal_(self.output_proj.weight, std=0.02)
+        nn.init.zeros_(self.output_proj.bias)
+    
+    def forward(self, x, inds=None):
+        """
+        Forward pass through the model.
+        
+        Args:
+            x: Input tensor of shape [batch_size, n_positions, d_token]
+            inds: Optional indices to compute predictions for specific positions
+                  If None, compute predictions for all positions
+                  
+        Returns:
+            Predictions tensor of shape [batch_size, n_positions] if inds is None
+            or [batch_size, len(inds)] if inds is provided
+        """
+        batch_size, seq_len, _ = x.shape
+        
+        # Project input to d_model dimension
+        x = self.input_proj(x)
+        
+        # Add positional embeddings
+        x = x + self.pos_embedding[:, :seq_len, :]
+        
+        # Apply transformer layers
+        x = self.transformer(x, inds=inds)
+        
+        # Project to scalar predictions
+        predictions = self.output_proj(x).squeeze(-1)
+        
+        return predictions
 
 
 class SimpleICLTransformer(nn.Module):

@@ -16,6 +16,7 @@ class ModelConfig:
     n_heads: int = 4                  # External name in yaml
     d_token: int = None               # Add support for d_token parameter used in ICLTransformer
     init_scale: float = 0.02          # Scale for weight initialization
+    kernel_type: str = "softmax"       # Type of kernel to use (relu, gelu, softmax)
 
 
 @dataclass
@@ -24,13 +25,26 @@ class TrainingConfig:
     learning_rate: float = 1e-3       # Changed to match lr in yaml
     n_batches: int = 1000             # Added to match yaml
     n_epochs: int = 20                # Added to match yaml
-    train_steps: int = 10000          # Kept for backward compatibility
-    eval_every: int = 100             # Changed to match yaml
-    save_every: int = 500             # Changed to match yaml 
-    patience: int = 5
-    seed: int = 42
-    warmup_steps: int = 1000
-    weight_decay: float = 0.01
+    train_steps: int = 10000          # Total number of training steps
+    steps_per_epoch: int = 500        # Number of training steps per epoch
+    eval_every: int = 100             # How often to evaluate on validation set
+    save_every: int = 500             # How often to save checkpoints
+    keep_every_steps: int = 2000      # How often to save model snapshots
+    patience: int = 5                 # Early stopping patience
+    seed: int = 42                    # Random seed
+    warmup_steps: int = 1000          # Learning rate warmup steps
+    weight_decay: float = 0.01        # Weight decay for optimizer
+    grad_clip: float = 1.0            # Gradient clipping value
+    n_val_tasks: int = 5              # Number of validation tasks
+    n_test_tasks: int = 0             # Number of test tasks
+    save_dir: str = None              # Directory to save model checkpoints
+    
+    # Curriculum learning parameters
+    min_points: int = 10              # Minimum number of points to start with
+    min_dims: int = 2                 # Minimum number of dimensions to start with
+    point_schedule: float = 0.5       # Fraction of training to reach max points
+    dim_schedule: float = 0.7         # Fraction of training to reach max dimensions
+    num_training_examples: int = None # Limit number of training examples (for seed management)
     
     
 @dataclass
