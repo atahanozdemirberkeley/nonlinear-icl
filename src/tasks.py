@@ -60,14 +60,33 @@ class Task:
         return xs, ys
 
 class LinearRegression(Task):
-    def __init__(self, n_dims, batch_size, scale=1, seed=None):
-        super().__init__(n_dims, batch_size, seed=seed)
+    def __init__(self, n_dims, batch_size, pool_dict=None, seeds=None, scale=1):
+        """scale: a constant by which to scale the randomly sampled weights."""
+        super().__init__(n_dims, batch_size, seed=None)  # Ignore the seed parameter in parent class
         self.scale = scale
-        self.w = torch.randn(batch_size, n_dims, 1) * scale
 
-    def evaluate(self, xs):
-        w = self.w.to(xs.device)
-        return (xs @ w)[:, :, 0]
+        if pool_dict is None and seeds is None:
+            self.w_b = torch.randn(batch_size, n_dims, 1)
+        elif seeds is not None:
+            self.w_b = torch.zeros(batch_size, n_dims, 1)
+            generator = torch.Generator()
+            assert len(seeds) == batch_size
+            for i, seed in enumerate(seeds):
+                generator.manual_seed(seed)
+                self.w_b[i] = torch.randn(n_dims, 1, generator=generator)
+        else:
+            assert "w" in pool_dict
+            indices = torch.randperm(len(pool_dict["w"]))[:batch_size]
+            self.w_b = pool_dict["w"][indices]
+
+    def evaluate(self, xs_b):
+        w_b = self.w_b.to(xs_b.device)
+        ys_b = self.scale * (xs_b @ w_b)[:, :, 0]
+        return ys_b
+        
+    @staticmethod
+    def generate_pool_dict(n_dims, num_tasks, **kwargs):  # ignore extra args
+        return {"w": torch.randn(num_tasks, n_dims, 1)}
 
 class QuadraticRegression(Task):
     def __init__(self, n_dims, batch_size, scale=1, seed=None):
@@ -80,6 +99,114 @@ class QuadraticRegression(Task):
         w1 = self.w1.to(xs.device)
         w2 = self.w2.to(xs.device)
         return (xs @ w1)[:, :, 0] + (xs ** 2 @ w2)[:, :, 0]
+
+class SinusoidalRegression(Task):
+    def __init__(self, n_dims, batch_size, scale=1.0, seed=None, seeds=None, x_range=5.0, 
+                 freq_min=0.5, freq_max=2.0, **kwargs):
+        """
+        Initialize the SinusoidalRegression task.
+        
+        Args:
+            n_dims: Input dimensionality (only the first dimension is used)
+            batch_size: Number of samples in a batch
+            scale: Scale factor for amplitudes
+            seed: Random seed for reproducibility (global)
+            seeds: Optional list of seeds (one per batch element)
+            x_range: Range for input sampling (-x_range, x_range)
+            freq_min: Minimum frequency for the sine wave
+            freq_max: Maximum frequency for the sine wave
+            **kwargs: Additional arguments (ignored, for compatibility with other tasks)
+        """
+        super().__init__(n_dims, batch_size, seed=seed)
+        self.scale = scale
+        self.x_range = x_range
+        self.freq_min = freq_min
+        self.freq_max = freq_max
+        
+        # Each batch gets different sinusoid parameters
+        # If seeds are provided, use them for reproducibility
+        if seeds is not None:
+            assert len(seeds) == batch_size, "Number of seeds must match batch size"
+            
+            # Create sinusoid parameters deterministically for each batch element
+            self.amplitude = torch.zeros(batch_size)
+            self.frequency = torch.zeros(batch_size)
+            self.phase = torch.zeros(batch_size)
+            
+            for i, seed in enumerate(seeds):
+                generator = torch.Generator()
+                generator.manual_seed(seed)
+                self.amplitude[i] = torch.empty(1, generator=generator).uniform_(0.5, 1.5) * scale
+                self.frequency[i] = torch.empty(1, generator=generator).uniform_(freq_min, freq_max)
+                self.phase[i] = torch.empty(1, generator=generator).uniform_(0, 2 * math.pi)
+        else:
+            # Random parameters (based on global seed if provided)
+            self.amplitude = torch.empty(batch_size).uniform_(0.5, 1.5) * scale
+            self.frequency = torch.empty(batch_size).uniform_(freq_min, freq_max)
+            self.phase = torch.empty(batch_size).uniform_(0, 2 * math.pi)
+    
+    def sample(self, batch_size, n_points, xs_seeds=None, ys_seeds=None):
+        """
+        Override sample method to use uniform distribution for x values in range (-x_range, x_range).
+        This ensures even coverage across multiple periods of the sine wave.
+        
+        Args:
+            batch_size: Number of batches
+            n_points: Number of points per batch
+            xs_seeds: Optional list of seeds for input sampling
+            ys_seeds: Optional list of seeds for output sampling
+            
+        Returns:
+            xs: Input tensor [batch_size, n_points, n_dims]
+            ys: Output tensor [batch_size, n_points]
+        """
+        # Set temporary random states if seeds are provided
+        prev_state = None
+        if xs_seeds is not None:
+            assert len(xs_seeds) == batch_size, "Number of seeds must match batch size"
+            prev_state = torch.get_rng_state()
+            
+        # Sample input points uniformly based on x_range parameter
+        xs = torch.empty(batch_size, n_points, self.n_dims).uniform_(-self.x_range, self.x_range)
+        
+        # Reset random state if we changed it
+        if prev_state is not None:
+            torch.set_rng_state(prev_state)
+        
+        # Set seed for outputs if provided
+        if ys_seeds is not None:
+            assert len(ys_seeds) == batch_size, "Number of seeds must match batch size"
+            prev_state = torch.get_rng_state()
+            for i, seed in enumerate(ys_seeds):
+                torch.manual_seed(seed)
+                # This is required for some generators that need randomness
+                
+        # Get outputs from task
+        ys = self.evaluate(xs)
+        
+        # Reset random state if we changed it
+        if prev_state is not None:
+            torch.set_rng_state(prev_state)
+            
+        return xs, ys
+        
+    def evaluate(self, xs):
+        """
+        Apply sinusoidal function y = A sin(ωx + φ)
+        Using just the first dimension of x if n_dims > 1
+        """
+        # Use just the first dimension if input is multi-dimensional
+        x = xs[:, :, 0]  # Shape: [batch_size, n_points]
+        
+        # Move parameters to device
+        amplitude = self.amplitude.to(xs.device).unsqueeze(1)  # Shape: [batch_size, 1]
+        frequency = self.frequency.to(xs.device).unsqueeze(1)  # Shape: [batch_size, 1]
+        phase = self.phase.to(xs.device).unsqueeze(1)  # Shape: [batch_size, 1]
+        
+        # Calculate sin(ωx + φ)
+        y = amplitude * torch.sin(frequency * x + phase)
+        
+        return y
 
 class ReLUNetwork(Task):
     def __init__(self, n_dims, batch_size, hidden_size=100, scale=1, seed=None):
@@ -95,191 +222,66 @@ class ReLUNetwork(Task):
         hidden = torch.relu(xs @ w1)
         return (hidden @ w2)[:, :, 0]
 
-class GaussianDistribution(Task):
-    def __init__(self, n_dims, batch_size, scale=1.0, seed=None):
-        super().__init__(n_dims, batch_size, seed=seed)
-        self.scale = scale
-        # Create random weights for linear function that determines mean
-        self.w = torch.randn(batch_size, n_dims) * scale
-        self.b = torch.randn(batch_size) * scale
-        # Set a fixed reasonable variance
-        self.sigma = torch.ones(batch_size) * 0.1
-        
-    def evaluate(self, xs):
-        """
-        Sample from a Gaussian distribution with mean determined by w*x + b
-        """
-        w = self.w.to(xs.device)
-        b = self.b.to(xs.device)
-        sigma = self.sigma.to(xs.device)
-        
-        # Calculate mean (mu) for each example as w*x + b
-        mu = torch.bmm(xs, w.unsqueeze(2)).squeeze(2) + b.unsqueeze(1)
-        
-        # Sample from the Gaussian distribution
-        eps = torch.randn_like(mu)
-        samples = mu + eps * sigma.unsqueeze(1)
-        
-        return samples
 
-class PoissonDistribution(Task):
-    def __init__(self, n_dims, batch_size, scale=1.0, seed=None):
-        super().__init__(n_dims, batch_size, seed=seed)
-        self.scale = scale
-        # Create random weights for linear function that determines lambda
-        self.w = torch.randn(batch_size, n_dims) * scale
-        self.b = torch.randn(batch_size) * scale
-        
-    def evaluate(self, xs):
-        """
-        Sample from a Poisson distribution with lambda determined by exp(w*x + b)
-        """
-        w = self.w.to(xs.device)
-        b = self.b.to(xs.device)
-        
-        # Calculate lambda parameter (must be positive)
-        lam = torch.exp(torch.bmm(xs, w.unsqueeze(2)).squeeze(2) + b.unsqueeze(1))
-        lam = torch.clamp(lam, min=0.1, max=20.0)  # Clamp to reasonable values
-        
-        # Sample from Poisson distribution
-        # Using Gaussian approximation for simplicity (valid for large lambda)
-        samples = torch.sqrt(lam) * torch.randn_like(lam) + lam
-        samples = torch.round(torch.clamp(samples, min=0))
-        
-        return samples
 
-class BernoulliDistribution(Task):
-    def __init__(self, n_dims, batch_size, scale=1.0, seed=None):
-        super().__init__(n_dims, batch_size, seed=seed)
-        self.scale = scale
-        # Create random weights for linear function that determines probability
-        self.w = torch.randn(batch_size, n_dims) * scale
-        self.b = torch.randn(batch_size) * scale
+def get_task_sampler(task_name, n_dims, batch_size, scale=1.0, num_tasks=None):
+    """
+    Creates a task sampler function that returns new task instances with optional seeds.
+    
+    Args:
+        task_name: Name of the task
+        n_dims: Number of dimensions for input
+        batch_size: Batch size
+        scale: Scale parameter for task
+        num_tasks: If provided, creates a pool of tasks to sample from
         
-    def evaluate(self, xs):
-        """
-        Sample from a Bernoulli distribution with probability determined by sigmoid(w*x + b)
-        """
-        w = self.w.to(xs.device)
-        b = self.b.to(xs.device)
+    Returns:
+        A function that creates task instances
+    """
+    # Create pool dict if num_tasks is provided
+    pool_dict = None
+    if num_tasks is not None:
+        if task_name == "linear":
+            pool_dict = LinearRegression.generate_pool_dict(n_dims, num_tasks)
+    
+    def task_sampler(seed=None, seeds=None):
+        task_args = {
+            "n_dims": n_dims,
+            "batch_size": batch_size,
+            "scale": scale,
+        }
         
-        # Calculate probability using sigmoid
-        logits = torch.bmm(xs, w.unsqueeze(2)).squeeze(2) + b.unsqueeze(1)
-        p = torch.sigmoid(logits)
+        # Only add pool_dict for tasks that support it (currently only linear)
+        if pool_dict is not None and task_name == "linear":
+            task_args["pool_dict"] = pool_dict
         
-        # Sample from Bernoulli distribution
-        samples = torch.bernoulli(p)
+        # Handle multiple seeds (for training with limited distribution pool)
+        if seeds is not None:
+            task_args["seeds"] = seeds
         
-        return samples
-
-class ExponentialDistribution(Task):
-    def __init__(self, n_dims, batch_size, scale=1.0, seed=None):
-        super().__init__(n_dims, batch_size, seed=seed)
-        self.scale = scale
-        # Create random weights for linear function that determines rate
-        self.w = torch.randn(batch_size, n_dims) * scale
-        self.b = torch.randn(batch_size) * scale
+        # Handle single seed - convert to list of seeds
+        if seed is not None:
+            if task_name == "linear":  # Only for tasks that support per-batch seeds
+                # Create a list of seeds derived from the base seed
+                generator = torch.Generator().manual_seed(seed)
+                derived_seeds = [torch.randint(0, 1000000, (1,), generator=generator).item() 
+                                for _ in range(batch_size)]
+                task_args["seeds"] = derived_seeds
+            else:
+                # For tasks that only support a global seed
+                task_args["seed"] = seed
+            
+        task = get_task(task_name, **task_args)
+        return task
         
-    def evaluate(self, xs):
-        """
-        Sample from an Exponential distribution with rate parameter determined by exp(w*x + b)
-        """
-        w = self.w.to(xs.device)
-        b = self.b.to(xs.device)
-        
-        # Calculate rate parameter (must be positive)
-        rate = torch.exp(torch.bmm(xs, w.unsqueeze(2)).squeeze(2) + b.unsqueeze(1))
-        rate = torch.clamp(rate, min=0.1, max=10.0)  # Clamp to reasonable values
-        
-        # Sample from Exponential distribution using inverse transform sampling
-        u = torch.rand_like(rate)
-        samples = -torch.log(u) / rate
-        
-        return samples
-
-class UniformDistribution(Task):
-    def __init__(self, n_dims, batch_size, scale=1.0, seed=None):
-        super().__init__(n_dims, batch_size, seed=seed)
-        self.scale = scale
-        # Create random weights for linear functions that determine lower and upper bounds
-        self.w_lower = torch.randn(batch_size, n_dims) * scale
-        self.b_lower = torch.randn(batch_size) * scale
-        self.w_upper = torch.randn(batch_size, n_dims) * scale
-        self.b_upper = torch.randn(batch_size) * scale
-        
-    def evaluate(self, xs):
-        """
-        Sample from a Uniform distribution with bounds determined by w*x + b
-        """
-        w_lower = self.w_lower.to(xs.device)
-        b_lower = self.b_lower.to(xs.device)
-        w_upper = self.w_upper.to(xs.device)
-        b_upper = self.b_upper.to(xs.device)
-        
-        # Calculate lower bound
-        lower = torch.tanh(torch.bmm(xs, w_lower.unsqueeze(2)).squeeze(2) + b_lower.unsqueeze(1))
-        
-        # Calculate upper bound (must be greater than lower bound)
-        # Using a positive offset to ensure upper > lower
-        offset = 0.1 + 0.9 * torch.sigmoid(torch.bmm(xs, w_upper.unsqueeze(2)).squeeze(2) + b_upper.unsqueeze(1))
-        upper = lower + offset
-        
-        # Sample from Uniform distribution using inverse transform sampling
-        u = torch.rand_like(lower)
-        samples = lower + u * (upper - lower)
-        
-        return samples
-
-class GammaDistribution(Task):
-    def __init__(self, n_dims, batch_size, scale=1.0, seed=None):
-        super().__init__(n_dims, batch_size, seed=seed)
-        self.scale = scale
-        # Create random weights for linear functions that determine shape and rate
-        self.w_shape = torch.randn(batch_size, n_dims) * scale
-        self.b_shape = torch.randn(batch_size) * scale
-        self.w_rate = torch.randn(batch_size, n_dims) * scale
-        self.b_rate = torch.randn(batch_size) * scale
-        
-    def evaluate(self, xs):
-        """
-        Sample from a Gamma distribution with shape and rate parameters
-        """
-        w_shape = self.w_shape.to(xs.device)
-        b_shape = self.b_shape.to(xs.device)
-        w_rate = self.w_rate.to(xs.device)
-        b_rate = self.b_rate.to(xs.device)
-        
-        # Calculate shape parameter (must be positive)
-        shape = torch.exp(torch.bmm(xs, w_shape.unsqueeze(2)).squeeze(2) + b_shape.unsqueeze(1))
-        shape = torch.clamp(shape, min=0.5, max=5.0)  # Clamp to reasonable values
-        
-        # Calculate rate parameter (must be positive)
-        rate = torch.exp(torch.bmm(xs, w_rate.unsqueeze(2)).squeeze(2) + b_rate.unsqueeze(1))
-        rate = torch.clamp(rate, min=0.5, max=5.0)  # Clamp to reasonable values
-        
-        # Sample from Gamma distribution
-        # Using approximation based on sum of exponentials for integer shape values
-        # For non-integer shape values, this is a reasonable approximation
-        samples = torch.zeros_like(shape)
-        for i in range(int(shape.max().item()) + 1):
-            # Add exponential samples based on shape
-            mask = (shape >= i).float()
-            u = torch.rand_like(rate)
-            samples += mask * (-torch.log(u) / rate)
-        
-        return samples
+    return task_sampler
 
 def get_task(task_name, n_dims, batch_size, **kwargs):
     task_map = {
         'linear': LinearRegression,
         'quadratic': QuadraticRegression,
-        'relu': ReLUNetwork,
-        'gaussian': GaussianDistribution,
-        'poisson': PoissonDistribution,
-        'bernoulli': BernoulliDistribution,
-        'exponential': ExponentialDistribution,
-        'gamma': GammaDistribution,
-        'uniform': UniformDistribution
+        'sinusoidal': SinusoidalRegression,
+        'relu': ReLUNetwork
     }
     if task_name not in task_map:
         raise ValueError(f"Unknown task: {task_name}")

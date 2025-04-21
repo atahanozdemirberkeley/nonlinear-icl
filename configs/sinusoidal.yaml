@@ -1,0 +1,49 @@
+# configs/sinusoidal.yaml
+output_dir: "experiments/sinusoidal"
+
+# Note: The original in-context-learning repo uses a GPT2-style model with
+# 12 layers, 8 heads, and embedding size 256. This is much larger than our
+# single-layer GregTransformer. We're using the same embedding dimensions
+# but with fewer layers, so expect fewer parameters overall.
+
+model:
+  model_type: "gpt2"        # Use GPT2-style model to match original repo
+  n_layer: 12               # Number of transformer layers (matches original repo)
+  n_positions: 41           # Total positions in sequence (matches original linear_regression)
+  n_dims: 1                 # Input dimensionality (1D is sufficient for sinusoidal)
+  d_model: 256              # Embedding dimension (matching original repo)
+  n_heads: 8                # Number of attention heads (matching original repo)
+  kernel_type: "softmax"    # Type of kernel (only used for ICLModel)
+
+task:
+  name: "sinusoidal"        # Task name (must match the key in task_map)
+  task_scale: 1.0           # Scale of the task (affects amplitude)
+  x_range: 5.0              # Input range for uniform sampling (-x_range, x_range)
+  freq_min: 0.5             # Minimum frequency for the sine wave
+  freq_max: 2.0             # Maximum frequency for the sine wave
+
+training:
+  batch_size: 128
+  learning_rate: 1e-4
+  train_steps: 10000
+  grad_clip: 1.0
+  save_every: 200
+  eval_every: 50
+  n_val_tasks: 5
+  
+  # Curriculum learning parameters (only for dimensions)
+  min_dims: 1              # Start with full dimensions as in original
+  dim_schedule: 0          # No dimension curriculum
+  
+  # Point settings
+  min_points: 41           # Same as n_positions
+  point_schedule: 0        # Disable point curriculum
+  
+  # Optional settings for task pools/seeds
+  num_unique_distributions: null  # null means no limit (infinite distributions)
+  pool_size: null          # Optional: create a fixed pool of tasks
+
+logging:
+  use_wandb: false
+  project_name: "prob-icl"
+  log_every: 100 

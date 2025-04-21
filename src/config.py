@@ -2,6 +2,8 @@
 import os
 import yaml
 from dataclasses import dataclass, asdict, field
+from types import SimpleNamespace
+import copy
 
 @dataclass
 class ModelConfig:
@@ -45,6 +47,7 @@ class TrainingConfig:
     point_schedule: float = 0.5       # Fraction of training to reach max points
     dim_schedule: float = 0.7         # Fraction of training to reach max dimensions
     num_training_examples: int = None # Limit number of training examples (for seed management)
+    num_unique_distributions: int = None # Limit to this many unique distributions (None = unlimited)
     
     
 @dataclass
@@ -65,66 +68,124 @@ class LoggingConfig:
 
 @dataclass
 class Config:
-    # Use field with default_factory to avoid mutable default issue
-    model: ModelConfig = field(default_factory=ModelConfig)
-    training: TrainingConfig = field(default_factory=TrainingConfig)
-    task: TaskConfig = field(default_factory=TaskConfig)
-    logging: LoggingConfig = field(default_factory=LoggingConfig)
-    output_dir: str = "outputs"
-    
-    def save(self, path):
-        """Save config to a YAML file"""
-        with open(path, 'w') as f:
-            yaml.dump(asdict(self), f)
-    
-    def copy(self):
-        """Create a deep copy of the config"""
-        config_dict = asdict(self)
-        new_config = Config()
+    """
+    Configuration class that loads from YAML and provides attribute-style access.
+    """
+    def __init__(self):
+        # Model params
+        self.model = SimpleNamespace(
+            n_dims=10,           # Input dimensionality
+            n_positions=10,      # Number of sequence positions (k+1)
+            d_token=None,        # Token dimension (if None, use n_dims + 1)
+            d_model=128,         # Model hidden dimension
+            n_heads=4,           # Number of attention heads
+            kernel_type='relu'   # Kernel type: 'relu', 'gelu', or 'softmax'
+        )
         
-        # Copy model config
-        new_config.model = ModelConfig(**config_dict.get('model', {}))
+        # Training params
+        self.training = SimpleNamespace(
+            batch_size=64,               # Batch size for training
+            learning_rate=5e-4,          # Learning rate
+            train_steps=10000,           # Number of training steps
+            min_dims=5,                  # Minimum dimensions for curriculum
+            dim_schedule=0.5,            # % of training to reach max dimensions (0 to disable)
+            num_unique_distributions=None, # Limit to this many unique distributions (None = unlimited)
+            grad_clip=1.0,               # Gradient clipping value (0 to disable)
+            n_val_tasks=10,              # Number of validation tasks
+            eval_every=500,              # Evaluate every this many steps
+            save_every=1000,             # Save checkpoint every this many steps
+        )
         
-        # Copy training config
-        new_config.training = TrainingConfig(**config_dict.get('training', {}))
+        # Task params
+        self.task = SimpleNamespace(
+            name='gaussian',      # Task name: 'gaussian', 'linear', 'quadratic', etc.
+            task_scale=0.25       # Scale for task weights
+        )
         
-        # Copy task config
-        new_config.task = TaskConfig(**config_dict.get('task', {}))
+        # Logging params
+        self.logging = SimpleNamespace(
+            use_wandb=False,        # Whether to use wandb
+            project_name='prob-icl', # Project name for wandb
+            log_every=100           # Log to wandb every this many steps
+        )
         
-        # Copy logging config
-        new_config.logging = LoggingConfig(**config_dict.get('logging', {}))
-        
-        # Copy output dir
-        new_config.output_dir = config_dict.get('output_dir', "outputs")
-        
-        return new_config
+        # Output params
+        self.output_dir = 'runs'    # Output directory for logs and checkpoints
     
     @classmethod
     def load(cls, path):
-        """Load config from a YAML file"""
-        with open(path, 'r') as f:
-            config_dict = yaml.safe_load(f)
-            
+        """Load configuration from YAML file."""
         config = cls()
+        if not os.path.exists(path):
+            print(f"Warning: Config file {path} not found. Using defaults.")
+            return config
         
-        # Load model config directly - no need for field name mapping anymore
-        # We now exactly match the parameter names from Greg Yang's implementation
-        config.model = ModelConfig(**config_dict.get('model', {}))
+        with open(path, 'r') as f:
+            yaml_config = yaml.safe_load(f)
         
-        # Map train to training for backwards compatibility
-        train_dict = config_dict.get('train', config_dict.get('training', {}))
-        if 'lr' in train_dict:
-            train_dict['learning_rate'] = train_dict['lr']
-            train_dict.pop('lr')  # Remove the 'lr' key to avoid unexpected keyword argument error
+        # Update config with values from YAML
+        for section, params in yaml_config.items():
+            if not hasattr(config, section):
+                setattr(config, section, SimpleNamespace())
             
-        config.training = TrainingConfig(**train_dict)
-        
-        # Load task config
-        config.task = TaskConfig(**config_dict.get('task', {}))
-        
-        # Load logging config
-        config.logging = LoggingConfig(**config_dict.get('logging', {}))
-        
-        config.output_dir = config_dict.get('output_dir', "outputs")
+            section_config = getattr(config, section)
+            
+            # Check if params is a dictionary before trying to iterate over it
+            if params is not None and isinstance(params, dict):
+                for key, value in params.items():
+                    # Special case for learning_rate - always convert to float
+                    if key == 'learning_rate':
+                        try:
+                            value = float(value)
+                        except (ValueError, TypeError):
+                            pass
+                    # Try to convert string numeric values to proper numeric types
+                    elif isinstance(value, str):
+                        try:
+                            # Try to convert to float (handles both regular decimals and scientific notation)
+                            value = float(value)
+                            # Convert to int if it's a whole number
+                            if value.is_integer():
+                                value = int(value)
+                        except ValueError:
+                            # If conversion fails, keep as string
+                            pass
+                    
+                    setattr(section_config, key, value)
+            elif params is not None:
+                # Handle case where params is a string or other non-dict value
+                setattr(config, section, params)
         
         return config
+    
+    def save(self, path):
+        """Save configuration to YAML file."""
+        # Convert to dictionary
+        config_dict = {}
+        for section_name in dir(self):
+            if section_name.startswith('_'):
+                continue
+            
+            section = getattr(self, section_name)
+            if not isinstance(section, SimpleNamespace):
+                continue
+            
+            config_dict[section_name] = {}
+            for key in dir(section):
+                if key.startswith('_'):
+                    continue
+                
+                value = getattr(section, key)
+                if callable(value):
+                    continue
+                
+                config_dict[section_name][key] = value
+        
+        # Save to file
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, 'w') as f:
+            yaml.dump(config_dict, f, default_flow_style=False)
+    
+    def copy(self):
+        """Create a deep copy of the config."""
+        return copy.deepcopy(self)

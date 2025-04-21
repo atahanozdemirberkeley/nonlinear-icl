@@ -1,0 +1,40 @@
+# configs/linear.yaml
+output_dir: "experiments/linear"
+
+model:
+  n_layer: 12               # Number of transformer layers (matches original repo)
+  n_positions: 41           # Total positions in sequence (matches original)
+  n_dims: 20                # Input dimensionality
+  d_model: 256              # Embedding dimension (matching original repo)
+  n_heads: 8                # Number of attention heads (matching original repo)
+  kernel_type: "softmax"    # Type of kernel (preserved for compatibility)
+
+task:
+  name: "linear"           # Task name (must match the key in task_map)
+  task_scale: 1.0          # Scale of the task weights (original uses 1.0)
+
+training:
+  batch_size: 64
+  train_steps: 20000
+  learning_rate: 1e-4      # Match original repo (0.0001)
+  grad_clip: 1.0
+  save_every: 500
+  eval_every: 100
+  n_val_tasks: 5
+  
+  # Curriculum learning parameters (only for dimensions)
+  min_dims: 20             # Start with full dimensions as in original
+  dim_schedule: 0          # No dimension curriculum
+  
+  # Point settings
+  min_points: 41           # Same as n_positions
+  point_schedule: 0        # Disable point curriculum
+  
+  # Optional settings for task pools/seeds
+  num_unique_distributions: null  # null means no limit (infinite distributions)
+  pool_size: null          # Optional: create a fixed pool of tasks
+
+logging:
+  use_wandb: false
+  project_name: "prob-icl"
+  log_every: 100 

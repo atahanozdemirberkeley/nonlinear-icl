@@ -29,10 +29,15 @@ training:
   keep_every_steps: 5000   # Save model snapshot every this many steps
 
   # Curriculum learning parameters
-  min_points: 10           # Start with this many points 
+  min_points: 60           # Use full sequence length (no curriculum on points)
   min_dims: 2              # Start with this many dimensions
-  point_schedule: 0.6      # Reach max points after 60% of training
+  point_schedule: 0        # Disable point curriculum
   dim_schedule: 0.8        # Reach max dimensions after 80% of training
+  
+  # Control the number of unique random distributions seen during training
+  # If set, model will only train on this many different distributions
+  # Useful for testing memorization vs. generalization
+  num_unique_distributions: null  # null means no limit (infinite distributions)
 
 logging:
   use_wandb: false

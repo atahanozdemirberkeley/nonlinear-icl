@@ -227,6 +227,73 @@ class ICLModel(nn.Module):
         return predictions
 
 
+class GPT2ICLModel(nn.Module):
+    """
+    In-context learning model based on GPT2, matching the original in-context-learning repo.
+    
+    This uses the HuggingFace Transformers GPT2Model as the backbone.
+    """
+    def __init__(self, d_token, n_positions, d_model=256, n_heads=8, n_layer=12):
+        super().__init__()
+        self.d_token = d_token
+        self.n_positions = n_positions
+        self.d_model = d_model
+        
+        # Configure the GPT2 model
+        configuration = GPT2Config(
+            n_positions=n_positions,
+            n_embd=d_model,
+            n_layer=n_layer,
+            n_head=n_heads,
+            resid_pdrop=0.0,  # No dropout
+            embd_pdrop=0.0,   # No dropout
+            attn_pdrop=0.0,   # No dropout
+            use_cache=False
+        )
+        
+        # Input projection
+        self.input_proj = nn.Linear(d_token, d_model)
+        
+        # GPT2 backbone
+        self._backbone = GPT2Model(configuration)
+        
+        # Output projection (to scalar prediction)
+        self.output_proj = nn.Linear(d_model, 1)
+        
+        self._init_weights()
+    
+    def _init_weights(self):
+        """Initialize model weights."""
+        # Initialize linear layers
+        nn.init.normal_(self.input_proj.weight, std=0.02)
+        nn.init.zeros_(self.input_proj.bias)
+        nn.init.normal_(self.output_proj.weight, std=0.02)
+        nn.init.zeros_(self.output_proj.bias)
+    
+    def forward(self, x):
+        """
+        Forward pass through the model.
+        
+        Args:
+            x: Input tensor of shape [batch_size, n_positions, d_token]
+            
+        Returns:
+            Predictions tensor of shape [batch_size, n_positions]
+        """
+        batch_size, seq_len, _ = x.shape
+        
+        # Project input to d_model dimension
+        x = self.input_proj(x)
+        
+        # Apply GPT2 model
+        output = self._backbone(inputs_embeds=x).last_hidden_state
+        
+        # Project to scalar predictions
+        predictions = self.output_proj(output).squeeze(-1)
+        
+        return predictions
+
+
 class SimpleICLTransformer(nn.Module):
     """
     Simple Transformer for In-Context Learning.
