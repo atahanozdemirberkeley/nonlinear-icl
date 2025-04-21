@@ -197,6 +197,39 @@ class ExponentialDistribution(Task):
         
         return samples
 
+class UniformDistribution(Task):
+    def __init__(self, n_dims, batch_size, scale=1.0, seed=None):
+        super().__init__(n_dims, batch_size, seed=seed)
+        self.scale = scale
+        # Create random weights for linear functions that determine lower and upper bounds
+        self.w_lower = torch.randn(batch_size, n_dims) * scale
+        self.b_lower = torch.randn(batch_size) * scale
+        self.w_upper = torch.randn(batch_size, n_dims) * scale
+        self.b_upper = torch.randn(batch_size) * scale
+        
+    def evaluate(self, xs):
+        """
+        Sample from a Uniform distribution with bounds determined by w*x + b
+        """
+        w_lower = self.w_lower.to(xs.device)
+        b_lower = self.b_lower.to(xs.device)
+        w_upper = self.w_upper.to(xs.device)
+        b_upper = self.b_upper.to(xs.device)
+        
+        # Calculate lower bound
+        lower = torch.tanh(torch.bmm(xs, w_lower.unsqueeze(2)).squeeze(2) + b_lower.unsqueeze(1))
+        
+        # Calculate upper bound (must be greater than lower bound)
+        # Using a positive offset to ensure upper > lower
+        offset = 0.1 + 0.9 * torch.sigmoid(torch.bmm(xs, w_upper.unsqueeze(2)).squeeze(2) + b_upper.unsqueeze(1))
+        upper = lower + offset
+        
+        # Sample from Uniform distribution using inverse transform sampling
+        u = torch.rand_like(lower)
+        samples = lower + u * (upper - lower)
+        
+        return samples
+
 class GammaDistribution(Task):
     def __init__(self, n_dims, batch_size, scale=1.0, seed=None):
         super().__init__(n_dims, batch_size, seed=seed)
@@ -245,7 +278,8 @@ def get_task(task_name, n_dims, batch_size, **kwargs):
         'poisson': PoissonDistribution,
         'bernoulli': BernoulliDistribution,
         'exponential': ExponentialDistribution,
-        'gamma': GammaDistribution
+        'gamma': GammaDistribution,
+        'uniform': UniformDistribution
     }
     if task_name not in task_map:
         raise ValueError(f"Unknown task: {task_name}")

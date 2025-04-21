@@ -149,8 +149,10 @@ def evaluate_model(model, task_name, n_dims, batch_size, n_positions, task_scale
     
     batch_offset = 0
     for run in tqdm(range(n_runs), desc="Evaluation runs"):
-        # Create task with the same scale as training
-        task = get_task(task_name, n_dims, batch_size=batch_size, scale=task_scale)
+        # Create task with the same scale as training but with a random seed
+        # This ensures we evaluate on unseen distributions
+        seed = None  # Set to None to get random sampling
+        task = get_task(task_name, n_dims, batch_size=batch_size, scale=task_scale, seed=seed)
         
         # Generate samples
         xs, ys = task.sample(batch_size, n_positions)
@@ -311,6 +313,9 @@ def main():
     parser.add_argument('--output_dir', type=str, default='eval_results', help='Output directory')
     parser.add_argument('--n_runs', type=int, default=10, help='Number of evaluation runs')
     parser.add_argument('--task_name', type=str, help='Override task name from config')
+    parser.add_argument('--n_dims', type=int, help='Override input dimensions')
+    parser.add_argument('--n_positions', type=int, default=60, help='Number of positions for evaluation (default: 60)')
+    parser.add_argument('--task_scale', type=float, help='Override task scale for evaluation')
     args = parser.parse_args()
     
     # Set device
@@ -332,13 +337,37 @@ def main():
         config.task.name = args.task_name
         print(f"Overriding task name to: {args.task_name}")
     
+    # Override dimensions if provided
+    dims_changed = False
+    if args.n_dims:
+        config.model.n_dims = args.n_dims
+        dims_changed = True
+        print(f"Overriding input dimensions to: {args.n_dims}")
+    
+    # Override task scale if provided
+    if args.task_scale:
+        config.task.task_scale = args.task_scale
+        print(f"Overriding task scale to: {args.task_scale}")
+    
+    # Override n_positions for evaluation
+    if args.n_positions:
+        config.model.n_positions = args.n_positions
+        print(f"Setting evaluation positions to: {args.n_positions}")
+    
     # Load model checkpoint
     checkpoint = torch.load(args.model_path, map_location=device, weights_only=False)
     
-    # Calculate d_token if not specified
-    if config.model.d_token is None:
+    # Calculate d_token if not specified or dimensions changed
+    if dims_changed or config.model.d_token is None:
         config.model.d_token = config.model.n_dims + 1
         print(f"Setting d_token to {config.model.d_token} (n_dims + 1)")
+    else:
+        # Ensure d_token is at least n_dims + 1
+        min_d_token = config.model.n_dims + 1
+        if config.model.d_token < min_d_token:
+            print(f"Warning: d_token ({config.model.d_token}) is less than n_dims + 1 ({min_d_token})")
+            print(f"Setting d_token to {min_d_token}")
+            config.model.d_token = min_d_token
     
     # Initialize model with the correct parameters
     model = ICLModel(
@@ -367,6 +396,15 @@ def main():
     
     # Evaluate model
     task_scale = getattr(config.task, 'task_scale', 0.25)  # Get task_scale or default to 0.25
+    
+    # Print evaluation parameters
+    print(f"\nEvaluation parameters:")
+    print(f"  Task: {config.task.name}")
+    print(f"  Dimensions: {config.model.n_dims}")
+    print(f"  Positions: {config.model.n_positions}")
+    print(f"  Task scale: {task_scale}")
+    print(f"  Number of runs: {args.n_runs}")
+    
     results = evaluate_model(
         model=model,
         task_name=config.task.name,

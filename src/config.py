@@ -77,6 +77,28 @@ class Config:
         with open(path, 'w') as f:
             yaml.dump(asdict(self), f)
     
+    def copy(self):
+        """Create a deep copy of the config"""
+        config_dict = asdict(self)
+        new_config = Config()
+        
+        # Copy model config
+        new_config.model = ModelConfig(**config_dict.get('model', {}))
+        
+        # Copy training config
+        new_config.training = TrainingConfig(**config_dict.get('training', {}))
+        
+        # Copy task config
+        new_config.task = TaskConfig(**config_dict.get('task', {}))
+        
+        # Copy logging config
+        new_config.logging = LoggingConfig(**config_dict.get('logging', {}))
+        
+        # Copy output dir
+        new_config.output_dir = config_dict.get('output_dir', "outputs")
+        
+        return new_config
+    
     @classmethod
     def load(cls, path):
         """Load config from a YAML file"""

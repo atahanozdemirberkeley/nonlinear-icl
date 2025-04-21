@@ -1,5 +1,5 @@
-# configs/gaussian.yaml
-output_dir: "experiments/gaussian"
+# configs/uniform.yaml
+output_dir: "experiments/uniform"
 
 model:
   n_positions: 60          # Total positions in sequence
@@ -9,7 +9,7 @@ model:
   kernel_type: "softmax"   # Type of kernel (transformer or softmax)
 
 task:
-  name: "gaussian"         # Distribution name
+  name: "uniform"          # Distribution name
 
 training:
   batch_size: 64
@@ -18,6 +18,7 @@ training:
   learning_rate: 0.003
   save_every: 500
   eval_every: 100
+  seed: 42
   patience: 30
   train_steps: 20000
   warmup_steps: 500
