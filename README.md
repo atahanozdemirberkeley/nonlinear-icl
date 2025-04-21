@@ -1,6 +1,6 @@
-# Kernel-ICL: In-Context Learning for Probability Distributions
+# In-Context Learning for Sinusoidal Functions
 
-This repository contains an implementation of a transformer-based model for in-context learning (ICL) of probability distributions.
+This repository contains an implementation of a transformer-based model for in-context learning (ICL) of sinusoidal functions.
 
 ## Configuration-Based Training and Evaluation
 
@@ -9,21 +9,21 @@ Training and evaluation are based on configuration files located in the `configs
 ### Available Configurations
 
 - `configs/default.yaml`: Default configuration
-- `configs/gaussian.yaml`: Configuration for Gaussian distribution tasks
-- `configs/gamma.yaml`: Configuration for Gamma distribution tasks (more complex)
+- `configs/sinusoidal.yaml`: Configuration for sinusoidal function tasks
+- `configs/linear.yaml`: Configuration for linear function tasks
 
 ### Training
 
 To train a model using a specific configuration file:
 
 ```bash
-python src/train.py --config configs/gaussian.yaml
+python src/train.py --config configs/sinusoidal.yaml
 ```
 
-You can override the task name while keeping other configuration options:
+You can override parameters while keeping other configuration options:
 
 ```bash
-python src/train.py --config configs/gaussian.yaml --task_name poisson
+python src/train.py --config configs/sinusoidal.yaml --freq_min 0.2 --freq_max 5.0
 ```
 
 ### Evaluation
@@ -31,59 +31,52 @@ python src/train.py --config configs/gaussian.yaml --task_name poisson
 To evaluate a trained model:
 
 ```bash
-python src/eval.py --config configs/gaussian.yaml --model_path outputs/[timestamp]/best_model.pt
-```
-
-You can evaluate on a different task than what the model was trained on:
-
-```bash
-python src/eval.py --config configs/gaussian.yaml --model_path outputs/[timestamp]/best_model.pt --task_name exponential
+python src/eval.py --config configs/sinusoidal.yaml --model_path experiments/sinusoidal_d1_s1.0_x5.0_f0.5-2.0/[timestamp]/best_model.pt
 ```
 
 ## Available Tasks
 
-- `gaussian`: Gaussian distribution
-- `poisson`: Poisson distribution
-- `bernoulli`: Bernoulli distribution
-- `exponential`: Exponential distribution
-- `gamma`: Gamma distribution
+- `sinusoidal`: Sinusoidal functions (y = A*sin(ωx + φ))
+- `linear`: Linear functions
+- `quadratic`: Quadratic functions
+- `relu`: ReLU network functions
 
 ## Model Architecture
 
-The model uses a transformer architecture based on GPT-2 to perform in-context learning. The key components are:
+The model uses a GPT2-style transformer architecture to perform in-context learning. The key components are:
 
 1. Input embeddings to project the input-output pairs to a higher-dimensional space
-2. Positional encoding to maintain sequence order
-3. Transformer layers for contextual processing
-4. Output projection to produce distribution parameter predictions
+2. Transformer layers (12 layers, 256 embedding dimension, 8 attention heads)
+3. Output projection to produce predictions
 
 ## Evaluating In-Context Learning Performance
 
 The evaluation compares the transformer model against several baselines:
 - 1-NN: 1-nearest neighbor
 - 3-NN: 3-nearest neighbors
-- Averaging: Simple averaging of previous outputs
+- Linear Regression: Least squares model
 
 Results are summarized and visualized to show how the model improves with more context examples.
 
 ## 📊 Research Question
 
-Can transformers implicitly approximate kernelized models such as RBF-kernel ridge regression purely through in-context learning, without explicit kernel feature computation?
+Can transformers learn to predict sinusoidal functions through in-context learning? How does performance vary with sinusoidal parameters like frequency and amplitude?
 
-This investigation builds upon the framework from [Garg et al. (2022)](https://arxiv.org/pdf/2208.01066), extending their function class from linear to kernelized (non-linear) functions.
+This investigation builds upon the framework from [Garg et al. (2022)](https://arxiv.org/pdf/2208.01066), focusing specifically on sinusoidal functions.
 
-## 🧩 Key Components
+## Key Sinusoidal Parameters
 
-- **Random Fourier Features (RFF)**: Used to approximate RBF kernels, bridging classical kernel theory with modern transformer models
-- **In-context Learning Transformer**: A transformer model that learns to predict function values from context examples
-- **Kernel Ridge Regression**: Serves as a baseline for comparison
+- **Amplitude (A)**: Controls the height of the sine wave, sampled from Uniform(0.5, 1.5) * scale
+- **Frequency (ω)**: Controls the periodicity, sampled from Uniform(freq_min, freq_max)
+- **Phase (φ)**: Controls the horizontal shift, sampled from Uniform(0, 2π)
+- **x_range**: Range of x values, uniformly sampled from (-x_range, x_range)
 
 ## 🛠️ Installation
 
 ```bash
 # Clone the repository
-git clone https://github.com/yourusername/kernel-icl.git
-cd kernel-icl
+git clone https://github.com/yourusername/prob-icl.git
+cd prob-icl
 
 # Install dependencies
 pip install -r requirements.txt
@@ -92,52 +85,51 @@ pip install -r requirements.txt
 ## 🚀 Usage
 
 ```bash
-# Train with default settings
-python src/train.py
+# Train with sinusoidal configuration
+python src/train.py --config configs/sinusoidal.yaml
 
-# Train with a specific configuration
-python src/train.py --config configs/default.yaml
+# Train with custom parameters
+python src/train.py --config configs/sinusoidal.yaml --batch_size 128 --steps 10000
 ```
 
 ## 📁 Project Structure
 
 ```
-kernel-icl/
+prob-icl/
 ├── src/
 │   ├── train.py         # Main training script
 │   ├── model.py         # Transformer model implementations
-│   ├── kernels.py       # RFF implementations and kernel methods
-│   ├── data.py          # Dataset creation utilities
+│   ├── tasks.py         # Task implementations (sinusoidal, linear, etc.)
 │   ├── eval.py          # Evaluation utilities
 │   └── config.py        # Configuration management
 ├── configs/             # Configuration files
-│   └── default.yaml     # Default configuration
-└── outputs/             # Training outputs (created during training)
-    └── YYYYMMDD_HHMMSS/ # Timestamped experiment directories
+│   └── sinusoidal.yaml  # Sinusoidal task configuration
+└── experiments/         # Training outputs (created during training)
+    └── sinusoidal_d1_s1.0_x5.0_f0.5-2.0/ # Experiment directories
 ```
 
 ## 📝 Methodology
 
 Our approach:
 
-1. **Generate RFF Functions**: We use Random Fourier Features to approximate RBF kernels
+1. **Generate Sinusoidal Functions**: We use parameterized sine waves with different amplitudes, frequencies, and phases
 2. **In-Context Learning**: The transformer learns to predict function values based on context examples
-3. **Evaluation**: We compare transformer performance with kernel ridge regression baselines
+3. **Evaluation**: We compare transformer performance with nearest-neighbor and linear regression baselines
 
 ## 📈 Results
 
 The key metrics we analyze:
 
-- MSE between transformer predictions and true function values
-- Comparison with kernel ridge regression at various regularization strengths
-- How performance varies with kernel parameters (e.g., σ)
+- MSE between transformer predictions and true sinusoidal values
+- How performance varies with frequency ranges and input ranges
+- Impact of context length on prediction accuracy
 
 ## 🔍 Parameter Selection
 
-- **RFF dimension**: Controls the approximation quality of the kernel
-- **Sigma**: Controls the smoothness of the generated functions
-- **Context length**: Number of examples provided for in-context learning
-- **Input dimension**: Dimension of the input space
+- **Frequency range**: Controls the complexity of sinusoidal functions (freq_min to freq_max)
+- **Input range**: Range of x values (-x_range to x_range)
+- **Context length**: Number of examples provided for in-context learning (n_positions)
+- **Amplitude scale**: Scale factor for the amplitude of sine waves
 
 ## 📚 Related Work
 
