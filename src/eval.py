@@ -7,6 +7,7 @@ import argparse
 import json
 from tqdm import tqdm
 import torch.nn as nn
+from datetime import datetime
 
 from model import GPT2ICLModel  # Use the same model as training
 from tasks import get_task
@@ -109,7 +110,7 @@ class AveragingBaseline:
         
         return predictions
 
-def evaluate_model(model, task_name, n_dims, batch_size, n_positions, task_scale=0.25, n_runs=10, device="cuda", baselines=None, config=None):
+def evaluate_model(model, task_name, n_dims, batch_size, n_positions, task_scale=1.0, n_runs=10, device="cuda", baselines=None, config=None):
     """
     Evaluate the model on a specific task with varying numbers of context examples.
     
@@ -158,6 +159,9 @@ def evaluate_model(model, task_name, n_dims, batch_size, n_positions, task_scale
     print(f"Task parameters: scale={task_scale}, {freq_info}, {x_info}")
     print(f"Evaluating in-context performance from 0 to {n_positions-1} context examples")
     
+    # Get model type from config
+    model_type = getattr(config.model, 'model_type', 'gpt2') if config else 'gpt2'
+    
     batch_offset = 0
     for run in tqdm(range(n_runs), desc="Evaluation runs"):
         # Create task with the same scale as training but with a random seed
@@ -190,13 +194,22 @@ def evaluate_model(model, task_name, n_dims, batch_size, n_positions, task_scale
                 else:
                     # Use context up to position i
                     xs_i = xs[:, :i+1]
-                    ys_i = ys[:, :i+1]
                     
-                    # Create prompt sequence
-                    prompt_seq = create_prompt_sequence(xs_i, ys_i, config)
+                    # FIX: Create masked ys to prevent label leakage
+                    # Use context up to position i-1, add a dummy for position i
+                    dummy = torch.zeros_like(ys[:, :1])
+                    ys_i_masked = torch.cat([ys[:, :i], dummy], dim=1)
                     
-                    # Get prediction for position i
-                    pred_i = model(prompt_seq)[:, i]
+                    # Create prompt sequence with masked target
+                    prompt_seq = create_prompt_sequence(xs_i, ys_i_masked, config)
+                    
+                    # Get prediction for position i (the last position with the dummy token)
+                    if model_type == 'mlp':
+                        # For MLP model - it returns predictions for all positions
+                        pred_i = model(prompt_seq)[:, i]
+                    else:
+                        # For transformer models - they return prediction at the last position
+                        pred_i = model(prompt_seq)[:, -1]
                 
                 # Store prediction
                 all_transformer_preds.append(pred_i)
@@ -287,7 +300,8 @@ def plot_learning_curves(results, output_dir, task_name="sinusoidal", n_dims=1):
     plt.grid(True, linestyle='--', alpha=0.7)
     plt.tight_layout()
     
-    plt.savefig(os.path.join(output_dir, "learning_curves.png"), dpi=300)
+    # Save with consistent naming pattern
+    plt.savefig(os.path.join(output_dir, f"{task_name}_d{n_dims}_learning_curve.png"), dpi=300)
     plt.close()
     
     # Plot normalized version to show relative improvement
@@ -323,215 +337,194 @@ def plot_learning_curves(results, output_dir, task_name="sinusoidal", n_dims=1):
     plt.grid(True, linestyle='--', alpha=0.7)
     plt.tight_layout()
     
-    plt.savefig(os.path.join(output_dir, "normalized_learning_curves.png"), dpi=300)
+    # Save with consistent naming pattern
+    plt.savefig(os.path.join(output_dir, f"{task_name}_d{n_dims}_normalized_learning_curve.png"), dpi=300)
     plt.close()
 
 def main():
-    parser = argparse.ArgumentParser(description="Evaluate In-Context Learning Model for Probability Distributions")
-    parser.add_argument('--config', type=str, default='configs/gaussian.yaml', help='Path to config file')
-    parser.add_argument('--model_path', type=str, required=True, help='Path to model checkpoint')
-    parser.add_argument('--output_dir', type=str, default='eval_results', help='Output directory')
+    parser = argparse.ArgumentParser(description="Evaluate ICL model for probability distributions")
+    parser.add_argument('--model_path', type=str, required=True, help='Path to saved model or checkpoint')
+    parser.add_argument('--task_name', type=str, default='sinusoidal', help='Task name for evaluation')
+    parser.add_argument('--n_dims', type=int, default=1, help='Input dimensions for evaluation')
+    parser.add_argument('--task_scale', type=float, default=1, help='Scale for task sampling')
     parser.add_argument('--n_runs', type=int, default=10, help='Number of evaluation runs')
-    parser.add_argument('--task_name', type=str, help='Override task name from config')
-    parser.add_argument('--n_dims', type=int, help='Override input dimensions')
-    parser.add_argument('--n_positions', type=int, default=41, help='Number of positions for evaluation (default: 60)')
-    parser.add_argument('--task_scale', type=float, help='Override task scale for evaluation')
+    parser.add_argument('--batch_size', type=int, default=16, help='Batch size for evaluation')
+    parser.add_argument('--output_dir', type=str, default='eval_results', help='Base directory to save results')
+    parser.add_argument('--seed', type=int, default=42, help='Random seed for reproducibility')
+    parser.add_argument('--model_type', type=str, default='gpt2', help='Model type (gpt2 or mlp)')
     args = parser.parse_args()
     
-    # Set device
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(f"Using device: {device}")
+    # Set random seed
+    set_seed(args.seed)
     
-    # Set seed for reproducibility
-    set_seed(42)
+    # Get task-specific output dir and timestamp from model path
+    model_dir = os.path.dirname(args.model_path)  # e.g., .../sinusoidal_d1_s1.0_x5.0_f0.2-5.0/20250422_013544
+    timestamp = os.path.basename(model_dir)  # e.g., 20250422_013544
+    task_dir_name = os.path.basename(os.path.dirname(model_dir))  # e.g., sinusoidal_d1_s1.0_x5.0_f0.2-5.0
     
-    # Create output directory
-    os.makedirs(args.output_dir, exist_ok=True)
+    # Mirror the exact directory structure but in eval_results
+    # eval_results/sinusoidal_d1_s1.0_x5.0_f0.2-5.0/20250422_013544
+    eval_dir = os.path.join(args.output_dir, task_dir_name, timestamp)
+    os.makedirs(eval_dir, exist_ok=True)
     
-    # Load configuration from file
-    config = Config.load(args.config)
-    print(f"Loaded configuration from {args.config}")
+    # Determine config path from model directory
+    config_path = os.path.join(model_dir, "config.yaml")
     
-    # Override task name if provided
-    if args.task_name:
-        config.task.name = args.task_name
-        print(f"Overriding task name to: {args.task_name}")
-    
-    # Override dimensions if provided
-    dims_changed = False
-    if args.n_dims:
-        config.model.n_dims = args.n_dims
-        dims_changed = True
-        print(f"Overriding input dimensions to: {args.n_dims}")
-    
-    # Override task scale if provided
-    if args.task_scale:
-        config.task.task_scale = args.task_scale
-        print(f"Overriding task scale to: {args.task_scale}")
-    
-    # Override n_positions for evaluation
-    original_n_positions = None
-    if args.n_positions:
-        # Store original value for creating the model
-        original_n_positions = config.model.n_positions
-        # Set new value for evaluation
-        config.model.n_positions = args.n_positions
-        print(f"Setting evaluation positions to: {args.n_positions}")
-    
-    # Load model checkpoint
-    checkpoint = torch.load(args.model_path, map_location=device)
-    
-    # Calculate d_token if not specified or dimensions changed
-    if dims_changed or config.model.d_token is None:
-        config.model.d_token = config.model.n_dims + 1
-        print(f"Setting d_token to {config.model.d_token} (n_dims + 1)")
+    # Try to load the configuration from the model directory
+    config = None
+    model_params = {}
+    if os.path.exists(config_path):
+        print(f"Loading configuration from {config_path}")
+        config = Config.load(config_path)
+        
+        # Extract model parameters from config
+        model_params = {
+            "d_model": config.model.d_model,
+            "n_heads": config.model.n_heads,
+            "n_layer": getattr(config.model, 'n_layer', 12),
+            "n_positions": config.model.n_positions,
+            "n_dims": config.model.n_dims,
+            "d_token": getattr(config.model, 'd_token', None),
+            "model_type": getattr(config.model, 'model_type', 'gpt2')
+        }
+        
+        print(f"Found model configuration: d_model={model_params['d_model']}, "
+              f"n_dims={model_params['n_dims']}, model_type={model_params['model_type']}")
     else:
-        # Ensure d_token is at least n_dims + 1
-        min_d_token = config.model.n_dims + 1
-        if config.model.d_token < min_d_token:
-            print(f"Warning: d_token ({config.model.d_token}) is less than n_dims + 1 ({min_d_token})")
-            print(f"Setting d_token to {min_d_token}")
-            config.model.d_token = min_d_token
+        # If no config.yaml, try to parse from directory/file name
+        print("No config.yaml found. Attempting to parse parameters from model path.")
+        
+        # Extract dimensions from directory name (e.g., sinusoidal_d1, d2, etc.
+        dir_name = os.path.basename(os.path.dirname(args.model_path))
+        
+        # Look for patterns like d1, d2, etc.
+        import re
+        d_match = re.search(r'd(\d+)', dir_name)
+        if d_match:
+            n_dims = int(d_match.group(1))
+            print(f"Extracted n_dims={n_dims} from directory name")
+            args.n_dims = n_dims  # Update n_dims
+        
+        # Default parameters if we couldn't extract from path
+        model_params = {
+            "d_model": 256,  # Default to 256 as in most configs
+            "n_heads": 8,
+            "n_layer": 12,
+            "n_positions": 41,
+            "n_dims": args.n_dims,  # Use provided or extracted n_dims
+            "model_type": args.model_type
+        }
+        
+        print(f"Using default model configuration: d_model={model_params['d_model']}, "
+              f"n_dims={model_params['n_dims']}, model_type={model_params['model_type']}")
     
-    # For loading the model, use the ORIGINAL n_positions to match the pretrained model
-    model_n_positions = original_n_positions or config.model.n_positions
+    # Calculate d_token if not specified
+    if 'd_token' not in model_params or model_params['d_token'] is None:
+        model_params['d_token'] = model_params['n_dims'] + 1
     
-    # Use GPT2ICLModel to match the model used in training
-    # Get number of layers from config (default to 12 if not specified)
-    n_layer = getattr(config.model, 'n_layer', 12)
+    # Create device
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     
-    model = GPT2ICLModel(
-        d_token=config.model.d_token,
-        n_positions=model_n_positions,  # Use original position count
-        d_model=config.model.d_model,
-        n_heads=config.model.n_heads,
-        n_layer=n_layer
-    ).to(device)
+    # Create model with the correct architecture parameters
+    if model_params['model_type'] == 'gpt2':
+        model = GPT2ICLModel(
+            d_token=model_params['d_token'],
+            n_positions=model_params['n_positions'],
+            d_model=model_params['d_model'],
+            n_heads=model_params['n_heads'],
+            n_layer=model_params['n_layer']
+        ).to(device)
+    elif model_params['model_type'] == 'mlp':
+        from model import MLPICLModel
+        hidden_dim = getattr(config.model, 'hidden_dim', 256) if config else 256
+        n_layers = getattr(config.model, 'n_layers', 4) if config else 4
+        
+        model = MLPICLModel(
+            d_token=model_params['d_token'],
+            n_positions=model_params['n_positions'],
+            hidden_dim=hidden_dim,
+            n_layers=n_layers
+        ).to(device)
+    else:
+        raise ValueError(f"Unknown model type: {model_params['model_type']}")
     
-    # Load model weights
+    # Load model state
+    print(f"Loading model from {args.model_path}")
     try:
-        if 'model_state_dict' in checkpoint:
-            model.load_state_dict(checkpoint['model_state_dict'])
-            print("Loaded model state from checkpoint")
+        checkpoint = torch.load(args.model_path, map_location=device)
+        
+        # Handle different checkpoint formats
+        if isinstance(checkpoint, dict) and "model_state_dict" in checkpoint:
+            model.load_state_dict(checkpoint["model_state_dict"])
         else:
             model.load_state_dict(checkpoint)
-            print("Loaded model weights directly")
-    except RuntimeError as e:
-        print(f"Error loading model weights: {e}")
-        print("Falling back to using the same number of positions as the checkpoint")
-        
-        # Try to detect the model's actual n_positions from the error message
-        import re
-        error_str = str(e)
-        match = re.search(r'torch\.Size\(\[(\d+), \d+\]\)', error_str)
-        if match:
-            detected_positions = int(match.group(1))
-            print(f"Detected {detected_positions} positions in checkpoint")
             
-            # Recreate model with detected positions
-            model = GPT2ICLModel(
-                d_token=config.model.d_token,
-                n_positions=detected_positions,
-                d_model=config.model.d_model,
-                n_heads=config.model.n_heads,
-                n_layer=n_layer
-            ).to(device)
-            
-            # Try loading again
-            if 'model_state_dict' in checkpoint:
-                model.load_state_dict(checkpoint['model_state_dict'])
-            else:
-                model.load_state_dict(checkpoint)
-            
-            # Update config to use detected positions
-            config.model.n_positions = detected_positions
-            print(f"Successfully loaded model with {detected_positions} positions")
-        else:
-            raise
+        print("Model loaded successfully")
+    except Exception as e:
+        print(f"Error loading model: {str(e)}")
+        print("Detailed error information:")
+        import traceback
+        traceback.print_exc()
+        return
     
-    print(f"Loaded model from {args.model_path}")
-    print(f"Model configuration:")
-    print(f"  Task: {config.task.name}")
-    print(f"  Input dimensions: {config.model.n_dims}")
-    print(f"  Model dimensions: {config.model.d_model}")
-    print(f"  Layers: {config.model.n_layer}")
-    print(f"  Heads: {config.model.n_heads}")
+    # Task parameters for evaluation
+    task_kwargs = {}
+    if config and config.task.name == "sinusoidal":
+        # Add sinusoidal-specific parameters if available
+        task_kwargs["x_range"] = getattr(config.task, 'x_range', 5.0)
+        task_kwargs["freq_min"] = getattr(config.task, 'freq_min', 0.5)
+        task_kwargs["freq_max"] = getattr(config.task, 'freq_max', 2.0)
     
     # Evaluate model
-    task_scale = getattr(config.task, 'task_scale', 0.25)  # Get task_scale or default to 0.25
-    
-    # Print evaluation parameters
-    print(f"\nEvaluation parameters:")
-    print(f"  Task: {config.task.name}")
-    print(f"  Dimensions: {config.model.n_dims}")
-    print(f"  Positions: {config.model.n_positions}")
-    print(f"  Task scale: {task_scale}")
-    print(f"  Number of runs: {args.n_runs}")
-    
+    print(f"Evaluating model on {args.task_name} task with {args.n_runs} runs")
     results = evaluate_model(
         model=model,
-        task_name=config.task.name,
-        n_dims=config.model.n_dims,
-        batch_size=32,  # Fixed batch size for evaluation
-        n_positions=config.model.n_positions,
-        task_scale=task_scale,
+        task_name=args.task_name,
+        n_dims=model_params['n_dims'],  # Use the model's n_dims
+        batch_size=args.batch_size,
+        n_positions=model_params['n_positions'],
+        task_scale=args.task_scale,
         n_runs=args.n_runs,
         device=device,
-        config=config  # Pass config to the evaluation function
+        config=config
     )
     
-    # Save results
-    with open(os.path.join(args.output_dir, f"{config.task.name}_results.json"), 'w') as f:
+    # Plot learning curves
+    plot_learning_curves(results, eval_dir, task_name=args.task_name, n_dims=model_params['n_dims'])
+    
+    # Save results to the timestamped directory
+    results_file = os.path.join(eval_dir, f"{args.task_name}_d{model_params['n_dims']}_results.json")
+    with open(results_file, 'w') as f:
         json.dump(results, f, indent=2)
     
-    # Plot learning curves
-    plot_learning_curves(results, args.output_dir, config.task.name, config.model.n_dims)
+    print(f"Results saved to {results_file}")
     
-    # Print detailed summary to terminal
-    print("\n" + "="*50)
-    print(f"EVALUATION RESULTS: {config.task.name} (d={config.model.n_dims})")
-    print("="*50)
+    # Display results summary
+    print("\n======= EVALUATION RESULTS =======")
+    print(f"Task: {args.task_name}, Dimensions: {model_params['n_dims']}, Scale: {args.task_scale}")
+    print(f"Number of runs: {args.n_runs}, Points per sequence: {model_params['n_positions']}")
+    print("\nMean Squared Error (MSE) by context length:")
     
-    # Print result summary for each model
-    for model_name, data in results.items():
-        print(f"\n{model_name} Performance:")
-        mean_errors = data["mean_error_by_context"]
-        
-        # Print key context points (start, middle, end)
-        print(f"  Zero-shot (0 examples): {mean_errors[0]:.6f}")
-        
-        # Print few-shot (points 5, 10, 20)
-        if len(mean_errors) > 5:
-            print(f"  Few-shot (5 examples): {mean_errors[5]:.6f}")
-        if len(mean_errors) > 10:
-            print(f"  Few-shot (10 examples): {mean_errors[10]:.6f}")
-        if len(mean_errors) > 20:
-            print(f"  Medium-shot (20 examples): {mean_errors[20]:.6f}")
-        
-        # Print final context
-        print(f"  Full-context ({len(mean_errors)-1} examples): {mean_errors[-1]:.6f}")
-        
-        # Calculate improvement
-        if mean_errors[0] > 0:
-            rel_improvement = (mean_errors[0] - mean_errors[-1]) / mean_errors[0] * 100
-            print(f"  Relative improvement: {rel_improvement:.2f}%")
+    transformer_errors = results["transformer"]["mean_error_by_context"]
+    for i, err in enumerate(transformer_errors):
+        print(f"  Context {i}: {err:.6f}")
     
-    # If transformer is in results, compare to baselines
-    if "transformer" in results:
-        print("\nComparison to Baselines:")
-        transformer_final = results["transformer"]["mean_error_by_context"][-1]
-        for model_name, data in results.items():
-            if model_name != "transformer":
-                baseline_final = data["mean_error_by_context"][-1]
-                ratio = transformer_final / baseline_final if baseline_final > 0 else float('inf')
-                if ratio < 1:
-                    print(f"  Transformer outperforms {model_name} by {(1/ratio - 1)*100:.2f}%")
-                else:
-                    print(f"  {model_name} outperforms Transformer by {(ratio - 1)*100:.2f}%")
+    print("\nAverage MSE by model:")
+    for model_name, model_results in results.items():
+        print(f"  {model_name}: {model_results['average_mse']:.6f}")
     
-    print("\nResults saved to:", os.path.join(args.output_dir, f"{config.task.name}_results.json"))
-    print("Learning curves saved to:", os.path.join(args.output_dir, "learning_curves.png"))
-    print("="*50)
+    print(f"\nFew-shot MSE (contexts 1-5): {results['transformer']['few_shot_mse']:.6f}")
+    print(f"Many-shot MSE (contexts 6+): {results['transformer']['many_shot_mse']:.6f}")
+    print(f"\nFull details saved to {results_file}")
+    
+    # Update file paths for learning curve plots
+    learning_curve_path = os.path.join(eval_dir, f"{args.task_name}_d{model_params['n_dims']}_learning_curve.png")
+    normalized_curve_path = os.path.join(eval_dir, f"{args.task_name}_d{model_params['n_dims']}_normalized_learning_curve.png")
+    
+    print(f"Learning curve plots saved to:")
+    print(f"  {learning_curve_path}")
+    print(f"  {normalized_curve_path}")
+    print("===================================")
 
 if __name__ == "__main__":
     main()

@@ -331,8 +331,9 @@ def get_task_sampler(task_name, n_dims, batch_size, scale=1.0, num_tasks=None, l
             pool_dict = LinearRegression.generate_pool_dict(n_dims, num_tasks)
         
     if task_name == 'kernel_rff':
-        # Determine RFF dimension - default to 128 features or use provided rff_dim or n_dims
+        # Respect provided rff_dim without fallback to 128
         D = rff_dim if rff_dim is not None else max(128, n_dims)
+        # Print only once during initialization
         print(f"Using {D} random Fourier features with lengthscale={lengthscale}")
         # Generate a single RFF mapping for all tasks
         # weight ~ N(0, 1/lengthscale^2)
@@ -347,8 +348,8 @@ def get_task_sampler(task_name, n_dims, batch_size, scale=1.0, num_tasks=None, l
             "scale": scale,
         }
         
-        # Only add pool_dict for tasks that support it (currently only linear)
-        if pool_dict is not None and task_name == "linear":
+        # Add pool_dict for tasks that need it (linear and kernel_rff)
+        if pool_dict is not None and (task_name == "linear" or task_name == "kernel_rff"):
             task_args["pool_dict"] = pool_dict
         
         # Handle multiple seeds (for training with limited distribution pool)
