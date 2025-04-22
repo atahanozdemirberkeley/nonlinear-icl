@@ -222,9 +222,92 @@ class ReLUNetwork(Task):
         hidden = torch.relu(xs @ w1)
         return (hidden @ w2)[:, :, 0]
 
+class KernelRFFRegression(Task):
+    def __init__(self, n_dims, batch_size, pool_dict, scale=1.0, seed=None, seeds=None, **kwargs):
+        """
+        In-context linear regression in a fixed RFF feature space.
 
+        Args:
+            pool_dict: {'phi_weight': Tensor[D,n_dims], 'phi_bias': Tensor[D]}
+            scale: scale for target w sampling
+            seeds: optional list of seeds for w sampling
+        """
+        super().__init__(n_dims, batch_size, seed)
+        self.scale = scale
+        self.phi_weight = pool_dict['phi_weight']  # [D, n_dims]
+        self.phi_bias = pool_dict['phi_bias']      # [D]
+        D = self.phi_weight.shape[0]
+        # Sample linear weights in feature space
+        if seeds is None:
+            self.w_b = torch.randn(batch_size, D, 1) * scale
+        else:
+            assert len(seeds) == batch_size
+            self.w_b = torch.zeros(batch_size, D, 1)
+            for i, sd in enumerate(seeds):
+                g = torch.Generator().manual_seed(sd)
+                self.w_b[i] = torch.randn(D, 1, generator=g) * scale
+    
+    def sample(self, batch_size, n_points, xs_seeds=None, ys_seeds=None):
+        """
+        Override sample method to use standard Gaussian for input distribution.
+        This creates cleaner RBF kernel mappings than uniform distributions.
+        
+        Args:
+            batch_size: Number of batches
+            n_points: Number of points per batch
+            xs_seeds: Optional list of seeds for input sampling
+            ys_seeds: Optional list of seeds for output sampling
+            
+        Returns:
+            xs: Input tensor [batch_size, n_points, n_dims]
+            ys: Output tensor [batch_size, n_points]
+        """
+        # Set temporary random states if seeds are provided
+        prev_state = None
+        if xs_seeds is not None:
+            assert len(xs_seeds) == batch_size, "Number of seeds must match batch size"
+            prev_state = torch.get_rng_state()
+            
+        # Sample input points from standard Gaussian
+        xs = torch.randn(batch_size, n_points, self.n_dims)
+        
+        # Reset random state if we changed it
+        if prev_state is not None:
+            torch.set_rng_state(prev_state)
+        
+        # Set seed for outputs if provided
+        if ys_seeds is not None:
+            assert len(ys_seeds) == batch_size, "Number of seeds must match batch size"
+            prev_state = torch.get_rng_state()
+            for i, seed in enumerate(ys_seeds):
+                torch.manual_seed(seed)
+                # This is required for some generators that need randomness
+                
+        # Get outputs from task
+        ys = self.evaluate(xs)
+        
+        # Reset random state if we changed it
+        if prev_state is not None:
+            torch.set_rng_state(prev_state)
+            
+        return xs, ys
 
-def get_task_sampler(task_name, n_dims, batch_size, scale=1.0, num_tasks=None):
+    def evaluate(self, xs):
+        # xs: [batch_size, n_points, n_dims]
+        # Compute RFF features: phi(x) = sqrt(2/D) * cos(x W^T + b)
+        batch, N, _ = xs.shape
+        W = self.phi_weight.to(xs.device)       # [D,n_dims]
+        b = self.phi_bias.to(xs.device)         # [D]
+        x_flat = xs.reshape(batch * N, -1)      # [batch*N, n_dims]
+        proj = x_flat @ W.t() + b               # [batch*N, D]
+        phi = torch.cos(proj) * math.sqrt(2.0 / W.shape[0])
+        phi = phi.reshape(batch, N, -1)         # [batch, N, D]
+        # Compute y = phi @ w
+        w = self.w_b.to(xs.device)              # [batch, D,1]
+        y = (phi @ w)[:, :, 0]                  # [batch, N]
+        return y
+
+def get_task_sampler(task_name, n_dims, batch_size, scale=1.0, num_tasks=None, lengthscale=1.0, rff_dim=None, **kwargs):
     """
     Creates a task sampler function that returns new task instances with optional seeds.
     
@@ -234,6 +317,9 @@ def get_task_sampler(task_name, n_dims, batch_size, scale=1.0, num_tasks=None):
         batch_size: Batch size
         scale: Scale parameter for task
         num_tasks: If provided, creates a pool of tasks to sample from
+        lengthscale: Lengthscale parameter for kernel tasks (controls smoothness)
+        rff_dim: Dimension for random Fourier features (defaults to 128 if not specified)
+        **kwargs: Additional arguments passed to tasks
         
     Returns:
         A function that creates task instances
@@ -243,6 +329,16 @@ def get_task_sampler(task_name, n_dims, batch_size, scale=1.0, num_tasks=None):
     if num_tasks is not None:
         if task_name == "linear":
             pool_dict = LinearRegression.generate_pool_dict(n_dims, num_tasks)
+        
+    if task_name == 'kernel_rff':
+        # Determine RFF dimension - default to 128 features or use provided rff_dim or n_dims
+        D = rff_dim if rff_dim is not None else max(128, n_dims)
+        print(f"Using {D} random Fourier features with lengthscale={lengthscale}")
+        # Generate a single RFF mapping for all tasks
+        # weight ~ N(0, 1/lengthscale^2)
+        phi_weight = torch.randn(D, n_dims) / lengthscale
+        phi_bias = torch.rand(D) * 2 * math.pi
+        pool_dict = {'phi_weight': phi_weight, 'phi_bias': phi_bias}
     
     def task_sampler(seed=None, seeds=None):
         task_args = {
@@ -281,7 +377,8 @@ def get_task(task_name, n_dims, batch_size, **kwargs):
         'linear': LinearRegression,
         'quadratic': QuadraticRegression,
         'sinusoidal': SinusoidalRegression,
-        'relu': ReLUNetwork
+        'relu': ReLUNetwork,
+        'kernel_rff': KernelRFFRegression
     }
     if task_name not in task_map:
         raise ValueError(f"Unknown task: {task_name}")

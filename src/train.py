@@ -40,30 +40,39 @@ def create_prompt_sequence(xs, ys, config):
     return prompt_seq
 
 def compute_loss_all_prefixes(model, xs, ys, config):
-    """Compute loss for all prefixes of the sequence."""
+    """
+    Compute average MSE across all prefix lengths without leaking the
+    current target label into the prompt.
+    """
+    # Ensure ys has shape (B, L, 1)
+    if ys.dim() == 2:
+        ys = ys.unsqueeze(-1)
+
     losses = []
-    
-    # For each prefix length i from 0 to seq_length-2
-    for i in range(1, xs.shape[1]):
-        # Take first i+1 examples
-        prefix_xs = xs[:, :i+1]
-        prefix_ys = ys[:, :i+1]
-        
-        # Create prompt sequence
+    model_type = getattr(config.model, "model_type", "gpt2")
+    seq_len = xs.shape[1]
+
+    for i in range(1, seq_len):
+        # ----- build prefix inputs -----
+        prefix_xs = xs[:, : i + 1]                  # (B, i+1, D_x)
+
+        # context labels y₀ … y_{i‑1}, plus dummy at position i
+        dummy     = torch.zeros_like(ys[:, :1])     # (B, 1, 1)
+        prefix_ys = torch.cat([ys[:, :i], dummy], dim=1)  # (B, i+1, 1)
+
         prompt = create_prompt_sequence(prefix_xs, prefix_ys, config)
-        
-        # Get prediction for the last position
-        prediction = model(prompt)[:, -1]  # Predict at the last position
-        
-        # Compute loss against the true label
-        target = ys[:, i]
-        if target.dim() == 2:
-            target = target.squeeze(-1)  # Remove feature dimension if present
-        
-        loss = F.mse_loss(prediction, target)
+
+        # ----- model forward -----
+        if model_type == "mlp":
+            prediction = model(prompt)[:, i]        # predict y_i
+        else:                                       # transformer/gpt2
+            prediction = model(prompt)[:, -1]       # last position
+
+        # ----- loss for this prefix -----
+        target = ys[:, i].squeeze(-1)               # (B,)
+        loss   = F.mse_loss(prediction.squeeze(-1), target)
         losses.append(loss)
-    
-    # Average loss across all prefix lengths
+
     return torch.stack(losses).mean()
 
 class Curriculum:
@@ -125,18 +134,38 @@ def train_model(config):
     if config.model.d_token is None:
         config.model.d_token = config.model.n_dims + 1
     
-    # Create model - use GPT2 model like in the original repo
-    # Get number of layers from config or use default of 12
-    n_layer = getattr(config.model, 'n_layer', 12)
+    # Create model based on model_type
+    model_type = getattr(config.model, 'model_type', 'gpt2')
     
-    model = GPT2ICLModel(
-        d_token=config.model.d_token,
-        n_positions=config.model.n_positions,
-        d_model=config.model.d_model,
-        n_heads=config.model.n_heads,
-        n_layer=n_layer
-    ).to(device)
-    print(f"Using GPT2-style model with {n_layer} layers")
+    if model_type == 'gpt2':
+        # Get number of layers from config or use default of 12
+        n_layer = getattr(config.model, 'n_layer', 12)
+        
+        model = GPT2ICLModel(
+            d_token=config.model.d_token,
+            n_positions=config.model.n_positions,
+            d_model=config.model.d_model,
+            n_heads=config.model.n_heads,
+            n_layer=n_layer
+        ).to(device)
+        print(f"Using GPT2-style model with {n_layer} layers")
+    elif model_type == 'mlp':
+        # Import MLPICLModel
+        from model import MLPICLModel
+        
+        # Get MLP-specific parameters
+        hidden_dim = getattr(config.model, 'hidden_dim', 256)
+        n_layers = getattr(config.model, 'n_layers', 4)
+        
+        model = MLPICLModel(
+            d_token=config.model.d_token,
+            n_positions=config.model.n_positions,
+            hidden_dim=hidden_dim,
+            n_layers=n_layers
+        ).to(device)
+        print(f"Using MLP model with {n_layers} layers and {hidden_dim} hidden dimensions")
+    else:
+        raise ValueError(f"Unknown model type: {model_type}")
     
     print(f"Model has {sum(p.numel() for p in model.parameters()):,} parameters")
     
@@ -188,12 +217,21 @@ def train_model(config):
         model.train()
         
         # Get task sampler for current curriculum dimensions
+        task_kwargs = {
+            "scale": getattr(config.task, 'task_scale', 0.25),
+            "num_tasks": getattr(config.training, 'pool_size', None)  # Support task pools
+        }
+        
+        # Add task-specific parameters
+        if config.task.name == 'kernel_rff':
+            task_kwargs["lengthscale"] = getattr(config.task, 'lengthscale', 1.0)
+            task_kwargs["rff_dim"] = getattr(config.task, 'rff_dim', 128)
+        
         task_sampler = get_task_sampler(
             config.task.name, 
             curriculum.n_dims_truncated,
             config.training.batch_size,
-            scale=getattr(config.task, 'task_scale', 0.25),
-            num_tasks=getattr(config.training, 'pool_size', None)  # Support task pools
+            **task_kwargs
         )
         
         # Handle seeds like in the original repo
@@ -314,15 +352,28 @@ def train_model(config):
     # Plot val loss with actual step numbers
     plt.plot(val_steps, val_losses, label="Val Loss", marker="o")
     
-    # Set x-axis to show actual step numbers
+    # Set x-axis to show a reasonable number of step values
     if steps:
-        plt.xticks(steps)  # Force x-axis to show all steps
+        # Only show around 10 tick marks regardless of how many steps there are
+        max_step = max(steps)
+        step_size = max(1, max_step // 10)
+        tick_positions = list(range(0, max_step + 1, step_size))
+        plt.xticks(tick_positions)
     
     plt.xlabel("Training Steps")
     plt.ylabel("Loss (MSE)")
     plt.title(f"{config.task.name} (d={config.model.n_dims})")
     plt.legend()
     plt.savefig(os.path.join(output_dir, "loss_curve.png"))
+    
+    # Save loss data for reproducibility
+    loss_data = {
+        'steps': steps,
+        'train_losses': train_losses,
+        'val_steps': val_steps,
+        'val_losses': val_losses
+    }
+    torch.save(loss_data, os.path.join(output_dir, "loss_data.pt"))
     
     # Close wandb
     if config.logging.use_wandb:
@@ -399,6 +450,12 @@ def main():
         freq_min = getattr(config.task, 'freq_min', 0.5)
         freq_max = getattr(config.task, 'freq_max', 2.0)
         output_dir = f"{output_dir}_s{task_scale}_x{x_range}_f{freq_min}-{freq_max}"
+    elif config.task.name == "kernel_rff":
+        # For kernel_rff tasks, include scale, lengthscale, and rff_dim
+        task_scale = getattr(config.task, 'task_scale', 0.25)
+        lengthscale = getattr(config.task, 'lengthscale', 1.0)
+        rff_dim = getattr(config.task, 'rff_dim', 128)
+        output_dir = f"{output_dir}_s{task_scale}_l{lengthscale}_rff{rff_dim}"
     else:
         # For other tasks, just include scale
         task_scale = getattr(config.task, 'task_scale', 0.25)

@@ -327,3 +327,74 @@ class SimpleICLTransformer(nn.Module):
         for layer in self.layers:
             h = layer(h, h)  # causal self-attention
         return self.output_proj(h[:, -1, :]).squeeze(-1)
+
+
+class MLPICLModel(nn.Module):
+    """
+    Simple MLP model for in-context learning without attention.
+    Uses sequential feed-forward layers to process the input sequence.
+    """
+    def __init__(self, d_token, n_positions, hidden_dim=256, n_layers=4):
+        super().__init__()
+        self.d_token = d_token
+        self.n_positions = n_positions
+        self.hidden_dim = hidden_dim
+        self.n_layers = n_layers
+        
+        # Create separate MLPs for each sequence length
+        self.mlps = nn.ModuleList()
+        
+        # Create MLPs for all possible prefix lengths
+        for i in range(1, n_positions + 1):
+            # Input size for this prefix length
+            input_size = i * d_token
+            
+            # Create an MLP for this prefix length
+            layers = []
+            layers.append(nn.Linear(input_size, hidden_dim))
+            layers.append(nn.ReLU())
+            
+            for _ in range(n_layers - 2):
+                layers.append(nn.Linear(hidden_dim, hidden_dim))
+                layers.append(nn.ReLU())
+            
+            layers.append(nn.Linear(hidden_dim, 1))
+            
+            self.mlps.append(nn.Sequential(*layers))
+        
+        self._init_weights()
+    
+    def _init_weights(self):
+        """Initialize model weights."""
+        for module in self.modules():
+            if isinstance(module, nn.Linear):
+                nn.init.normal_(module.weight, std=0.02)
+                if module.bias is not None:
+                    nn.init.zeros_(module.bias)
+    
+    def forward(self, x):
+        """
+        Args:
+            x: Input tensor of shape [batch_size, seq_len, d_token]
+        Returns:
+            Predictions for all positions
+        """
+        batch_size, seq_len, _ = x.shape
+        
+        # Initialize output tensor
+        outputs = torch.zeros(batch_size, self.n_positions, device=x.device)
+        
+        # Process for the current sequence length
+        if seq_len <= self.n_positions:
+            # Flatten the sequence
+            x_flat = x.reshape(batch_size, -1)
+            
+            # Use the appropriate MLP for this sequence length
+            mlp_idx = seq_len - 1  # 0-indexed
+            output = self.mlps[mlp_idx](x_flat)
+            
+            # The model predicts the next value after the sequence
+            if seq_len < self.n_positions:
+                outputs[:, seq_len] = output.squeeze(-1)
+            
+        return outputs

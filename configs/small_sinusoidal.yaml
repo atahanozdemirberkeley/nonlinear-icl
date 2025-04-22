@@ -1,19 +1,16 @@
-# configs/sinusoidal.yaml
-output_dir: "experiments/sinusoidal"
+# configs/small_sinusoidal.yaml
+output_dir: "experiments/small_sinusoidal"
 
-# Note: The original in-context-learning repo uses a GPT2-style model with
-# 12 layers, 8 heads, and embedding size 256. This is much larger than our
-# single-layer GregTransformer. We're using the same embedding dimensions
-# but with fewer layers, so expect fewer parameters overall.
+# Smaller model for faster training and testing
 
 model:
   model_type: "gpt2"        # Use GPT2-style model to match original repo
-  n_layer: 12               # Number of transformer layers (matches original repo)
-  n_positions: 41           # Total positions in sequence (matches original linear_regression)
+  n_layer: 4                # Reduced from 12 to 4 layers
+  n_positions: 41           # Total positions in sequence
   n_dims: 1                 # Input dimensionality (1D is sufficient for sinusoidal)
-  d_model: 256              # Embedding dimension (matching original repo)
-  n_heads: 8                # Number of attention heads (matching original repo)
-  kernel_type: "softmax"    # Type of kernel (only used for ICLModel)
+  d_model: 128              # Reduced from 256 to 128 embedding dimension
+  n_heads: 4                # Reduced from 8 to 4 attention heads
+  kernel_type: "softmax"    # Type of kernel
 
 task:
   name: "sinusoidal"        # Task name (must match the key in task_map)
@@ -24,11 +21,11 @@ task:
 
 training:
   batch_size: 64
-  learning_rate: 7e-5
-  train_steps: 10000
+  train_steps: 5000         # Reduced training steps since we expect faster convergence
+  learning_rate: 1e-4
   grad_clip: 1.0
-  save_every: 200
-  eval_every: 50
+  save_every: 500
+  eval_every: 100
   n_val_tasks: 5
   
   # Curriculum learning parameters (only for dimensions)

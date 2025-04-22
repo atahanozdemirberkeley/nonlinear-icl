@@ -8,9 +8,8 @@ import json
 from tqdm import tqdm
 import torch.nn as nn
 
-from model import ICLModel  # Changed from GregTransformer to ICLModel
+from model import GPT2ICLModel  # Use the same model as training
 from tasks import get_task
-from data_generator import generate_samples_for_task
 from config import Config
 from train import create_prompt_sequence  # Import create_prompt_sequence function
 
@@ -113,7 +112,6 @@ class AveragingBaseline:
 def evaluate_model(model, task_name, n_dims, batch_size, n_positions, task_scale=0.25, n_runs=10, device="cuda", baselines=None, config=None):
     """
     Evaluate the model on a specific task with varying numbers of context examples.
-    This follows Greg Yang's evaluation approach.
     
     Args:
         model: Trained model
@@ -147,12 +145,33 @@ def evaluate_model(model, task_name, n_dims, batch_size, n_positions, task_scale
     for baseline in baselines:
         baseline_metrics[baseline.name] = torch.zeros(n_runs * batch_size, n_positions)
     
+    # Get x_range and frequency range from config if available
+    x_range = getattr(config.task, 'x_range', 5.0) if config else 5.0
+    freq_min = getattr(config.task, 'freq_min', 0.5) if config else 0.5
+    freq_max = getattr(config.task, 'freq_max', 2.0) if config else 2.0
+    
+    # Create frequency and x_range info string for printing
+    freq_info = f"frequency range: {freq_min}-{freq_max}" if task_name == "sinusoidal" else ""
+    x_info = f"x_range: {x_range}" if task_name == "sinusoidal" else ""
+    
+    print(f"Evaluating {task_name} task with {n_runs} runs, {batch_size} examples per run")
+    print(f"Task parameters: scale={task_scale}, {freq_info}, {x_info}")
+    print(f"Evaluating in-context performance from 0 to {n_positions-1} context examples")
+    
     batch_offset = 0
     for run in tqdm(range(n_runs), desc="Evaluation runs"):
         # Create task with the same scale as training but with a random seed
         # This ensures we evaluate on unseen distributions
         seed = None  # Set to None to get random sampling
-        task = get_task(task_name, n_dims, batch_size=batch_size, scale=task_scale, seed=seed)
+        
+        # Add all relevant parameters for sinusoidal task
+        task_kwargs = {"scale": task_scale, "seed": seed}
+        if task_name == "sinusoidal" and config:
+            task_kwargs["x_range"] = x_range
+            task_kwargs["freq_min"] = freq_min
+            task_kwargs["freq_max"] = freq_max
+            
+        task = get_task(task_name, n_dims, batch_size=batch_size, **task_kwargs)
         
         # Generate samples
         xs, ys = task.sample(batch_size, n_positions)
@@ -232,14 +251,15 @@ def evaluate_model(model, task_name, n_dims, batch_size, n_positions, task_scale
     
     return results
 
-def plot_learning_curves(results, output_dir):
+def plot_learning_curves(results, output_dir, task_name="sinusoidal", n_dims=1):
     """
     Plot learning curves for all models showing how error decreases with more context.
-    This matches Greg Yang's visualization approach.
     
     Args:
         results: Dictionary of evaluation results
         output_dir: Directory to save plots
+        task_name: Name of the task
+        n_dims: Number of input dimensions
     """
     plt.figure(figsize=(12, 8))
     
@@ -262,7 +282,7 @@ def plot_learning_curves(results, output_dir):
     
     plt.xlabel("Number of In-Context Examples", fontsize=14)
     plt.ylabel("Mean Squared Error", fontsize=14)
-    plt.title("In-Context Learning Performance on Gaussian Distribution", fontsize=16)
+    plt.title(f"In-Context Learning Performance on {task_name} (d={n_dims})", fontsize=16)
     plt.legend(fontsize=12)
     plt.grid(True, linestyle='--', alpha=0.7)
     plt.tight_layout()
@@ -314,7 +334,7 @@ def main():
     parser.add_argument('--n_runs', type=int, default=10, help='Number of evaluation runs')
     parser.add_argument('--task_name', type=str, help='Override task name from config')
     parser.add_argument('--n_dims', type=int, help='Override input dimensions')
-    parser.add_argument('--n_positions', type=int, default=60, help='Number of positions for evaluation (default: 60)')
+    parser.add_argument('--n_positions', type=int, default=41, help='Number of positions for evaluation (default: 60)')
     parser.add_argument('--task_scale', type=float, help='Override task scale for evaluation')
     args = parser.parse_args()
     
@@ -350,12 +370,16 @@ def main():
         print(f"Overriding task scale to: {args.task_scale}")
     
     # Override n_positions for evaluation
+    original_n_positions = None
     if args.n_positions:
+        # Store original value for creating the model
+        original_n_positions = config.model.n_positions
+        # Set new value for evaluation
         config.model.n_positions = args.n_positions
         print(f"Setting evaluation positions to: {args.n_positions}")
     
     # Load model checkpoint
-    checkpoint = torch.load(args.model_path, map_location=device, weights_only=False)
+    checkpoint = torch.load(args.model_path, map_location=device)
     
     # Calculate d_token if not specified or dimensions changed
     if dims_changed or config.model.d_token is None:
@@ -369,22 +393,61 @@ def main():
             print(f"Setting d_token to {min_d_token}")
             config.model.d_token = min_d_token
     
-    # Initialize model with the correct parameters
-    model = ICLModel(
+    # For loading the model, use the ORIGINAL n_positions to match the pretrained model
+    model_n_positions = original_n_positions or config.model.n_positions
+    
+    # Use GPT2ICLModel to match the model used in training
+    # Get number of layers from config (default to 12 if not specified)
+    n_layer = getattr(config.model, 'n_layer', 12)
+    
+    model = GPT2ICLModel(
         d_token=config.model.d_token,
-        n_positions=config.model.n_positions,
+        n_positions=model_n_positions,  # Use original position count
         d_model=config.model.d_model,
         n_heads=config.model.n_heads,
-        kernel_type=config.model.kernel_type
+        n_layer=n_layer
     ).to(device)
     
     # Load model weights
-    if 'model_state_dict' in checkpoint:
-        model.load_state_dict(checkpoint['model_state_dict'])
-        print("Loaded model state from checkpoint")
-    else:
-        model.load_state_dict(checkpoint)
-        print("Loaded model weights directly")
+    try:
+        if 'model_state_dict' in checkpoint:
+            model.load_state_dict(checkpoint['model_state_dict'])
+            print("Loaded model state from checkpoint")
+        else:
+            model.load_state_dict(checkpoint)
+            print("Loaded model weights directly")
+    except RuntimeError as e:
+        print(f"Error loading model weights: {e}")
+        print("Falling back to using the same number of positions as the checkpoint")
+        
+        # Try to detect the model's actual n_positions from the error message
+        import re
+        error_str = str(e)
+        match = re.search(r'torch\.Size\(\[(\d+), \d+\]\)', error_str)
+        if match:
+            detected_positions = int(match.group(1))
+            print(f"Detected {detected_positions} positions in checkpoint")
+            
+            # Recreate model with detected positions
+            model = GPT2ICLModel(
+                d_token=config.model.d_token,
+                n_positions=detected_positions,
+                d_model=config.model.d_model,
+                n_heads=config.model.n_heads,
+                n_layer=n_layer
+            ).to(device)
+            
+            # Try loading again
+            if 'model_state_dict' in checkpoint:
+                model.load_state_dict(checkpoint['model_state_dict'])
+            else:
+                model.load_state_dict(checkpoint)
+            
+            # Update config to use detected positions
+            config.model.n_positions = detected_positions
+            print(f"Successfully loaded model with {detected_positions} positions")
+        else:
+            raise
     
     print(f"Loaded model from {args.model_path}")
     print(f"Model configuration:")
@@ -392,7 +455,7 @@ def main():
     print(f"  Input dimensions: {config.model.n_dims}")
     print(f"  Model dimensions: {config.model.d_model}")
     print(f"  Layers: {config.model.n_layer}")
-    print(f"  Heads: {config.model.n_head}")
+    print(f"  Heads: {config.model.n_heads}")
     
     # Evaluate model
     task_scale = getattr(config.task, 'task_scale', 0.25)  # Get task_scale or default to 0.25
@@ -422,19 +485,53 @@ def main():
         json.dump(results, f, indent=2)
     
     # Plot learning curves
-    plot_learning_curves(results, args.output_dir)
+    plot_learning_curves(results, args.output_dir, config.task.name, config.model.n_dims)
     
-    # Print summary
-    print("\nEvaluation Results:")
+    # Print detailed summary to terminal
+    print("\n" + "="*50)
+    print(f"EVALUATION RESULTS: {config.task.name} (d={config.model.n_dims})")
+    print("="*50)
+    
+    # Print result summary for each model
     for model_name, data in results.items():
-        mean_final = data["mean_error_by_context"][-1]
-        print(f"{model_name}: Final Error = {mean_final:.6f}")
+        print(f"\n{model_name} Performance:")
+        mean_errors = data["mean_error_by_context"]
+        
+        # Print key context points (start, middle, end)
+        print(f"  Zero-shot (0 examples): {mean_errors[0]:.6f}")
+        
+        # Print few-shot (points 5, 10, 20)
+        if len(mean_errors) > 5:
+            print(f"  Few-shot (5 examples): {mean_errors[5]:.6f}")
+        if len(mean_errors) > 10:
+            print(f"  Few-shot (10 examples): {mean_errors[10]:.6f}")
+        if len(mean_errors) > 20:
+            print(f"  Medium-shot (20 examples): {mean_errors[20]:.6f}")
+        
+        # Print final context
+        print(f"  Full-context ({len(mean_errors)-1} examples): {mean_errors[-1]:.6f}")
+        
+        # Calculate improvement
+        if mean_errors[0] > 0:
+            rel_improvement = (mean_errors[0] - mean_errors[-1]) / mean_errors[0] * 100
+            print(f"  Relative improvement: {rel_improvement:.2f}%")
     
-    # Print relative improvement
-    transformer_errors = results["transformer"]["mean_error_by_context"]
-    if transformer_errors[0] > 0:
-        relative_improvement = (transformer_errors[0] - transformer_errors[-1]) / transformer_errors[0] * 100
-        print(f"\nTransformer relative improvement: {relative_improvement:.2f}%")
+    # If transformer is in results, compare to baselines
+    if "transformer" in results:
+        print("\nComparison to Baselines:")
+        transformer_final = results["transformer"]["mean_error_by_context"][-1]
+        for model_name, data in results.items():
+            if model_name != "transformer":
+                baseline_final = data["mean_error_by_context"][-1]
+                ratio = transformer_final / baseline_final if baseline_final > 0 else float('inf')
+                if ratio < 1:
+                    print(f"  Transformer outperforms {model_name} by {(1/ratio - 1)*100:.2f}%")
+                else:
+                    print(f"  {model_name} outperforms Transformer by {(ratio - 1)*100:.2f}%")
+    
+    print("\nResults saved to:", os.path.join(args.output_dir, f"{config.task.name}_results.json"))
+    print("Learning curves saved to:", os.path.join(args.output_dir, "learning_curves.png"))
+    print("="*50)
 
 if __name__ == "__main__":
     main()

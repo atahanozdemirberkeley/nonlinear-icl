@@ -1,0 +1,44 @@
+# configs/mlp_sinusoidal.yaml
+output_dir: "experiments/mlp_sinusoidal"
+
+# MLP model configuration for comparison with transformer
+
+model:
+  model_type: "mlp"         # This indicates we'll use the MLP model
+  n_positions: 41           # Total positions in sequence
+  n_dims: 1                 # Input dimensionality (1D for sinusoidal)
+  hidden_dim: 256           # Hidden dimension size
+  n_layers: 4               # Number of MLP layers
+
+task:
+  name: "sinusoidal"        # Task name
+  task_scale: 1.0           # Scale of the task (affects amplitude)
+  x_range: 10.0              # Input range for uniform sampling (-x_range, x_range)
+  freq_min: 5            # Minimum frequency for the sine wave
+  freq_max: 10        # Maximum frequency for the sine wave
+
+training:
+  batch_size: 64
+  train_steps: 5000         # Same as small_sinusoidal for direct comparison
+  learning_rate: 1e-4
+  grad_clip: 1.0
+  save_every: 500
+  eval_every: 100
+  n_val_tasks: 5
+  
+  # Curriculum learning parameters
+  min_dims: 1
+  dim_schedule: 0
+  
+  # Point settings
+  min_points: 41
+  point_schedule: 0
+  
+  # Optional settings for task pools/seeds
+  num_unique_distributions: null
+  pool_size: null
+
+logging:
+  use_wandb: false
+  project_name: "prob-icl"
+  log_every: 100 

@@ -1,0 +1,44 @@
+# configs/kernel_rff.yaml
+output_dir: "experiments/kernel_rff"
+
+# Configuration for kernel_rff task using Random Fourier Features
+
+model:
+  model_type: "gpt2"        # Use GPT2-style model
+  n_layer: 4                # Number of transformer layers (4 for the small model)
+  n_positions: 41           # Total positions in sequence
+  n_dims: 10                # Input dimensionality 
+  d_model: 256              # Embedding dimension (256 for the smaller model)
+  n_heads: 4                # Number of attention heads
+
+task:
+  name: "kernel_rff"        # Task name (must match the key in task_map)
+  task_scale: 1.0           # Scale of the weights (affects output range)
+  lengthscale: 1.0          # Lengthscale for RBF kernel approximation
+  rff_dim: 128              # Dimension of random Fourier features
+
+training:
+  batch_size: 64
+  train_steps: 10000
+  learning_rate: 1e-4
+  grad_clip: 1.0
+  save_every: 500
+  eval_every: 100
+  n_val_tasks: 5
+  
+  # Curriculum learning parameters
+  min_dims: 1               # Start with 1 dimension
+  dim_schedule: 0.3         # Use 30% of training to reach full dimensions
+  
+  # Point settings (full context length)
+  min_points: 41            # Same as n_positions
+  point_schedule: 0         # No curriculum on points
+  
+  # Distribution pool settings
+  num_unique_distributions: null  # null means no limit (infinite distributions)
+  pool_size: null           # Optional: create a fixed pool of tasks
+
+logging:
+  use_wandb: false
+  project_name: "prob-icl"
+  log_every: 100 
