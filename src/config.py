@@ -1,8 +1,11 @@
 # src/config.py
+import argparse
+import ast
 import os
 import yaml
 from dataclasses import dataclass, asdict, field
 from types import SimpleNamespace
+from typing import List, Optional
 import copy
 
 @dataclass
@@ -13,11 +16,11 @@ class ModelConfig:
     n_layer: int = 4                   # Number of transformer layers
     n_head: int = 4                    # Number of attention heads
     dropout: float = 0.0               # Dropout rate
-    d_model: int = 128                # External name in yaml
-    n_layers: int = 4                 # External name in yaml
-    n_heads: int = 4                  # External name in yaml
-    d_token: int = None               # Add support for d_token parameter used in ICLTransformer
-    init_scale: float = 0.02          # Scale for weight initialization
+    d_model: int = 128                 # External name in yaml
+    n_layers: int = 4                  # External name in yaml
+    n_heads: int = 4                   # External name in yaml
+    d_token: int = None                # Add support for d_token parameter used in ICLTransformer
+    init_scale: float = 0.02           # Scale for weight initialization
     kernel_type: str = "softmax"       # Type of kernel to use (relu, gelu, softmax)
 
 
@@ -62,7 +65,7 @@ class TaskConfig:
 @dataclass
 class LoggingConfig:
     use_wandb: bool = False
-    project_name: str = "kernel-icl"
+    project_name: str = "Sinusoidal-ICL"
     log_every: int = 100
     
 
@@ -104,22 +107,20 @@ class Config:
         
         # Logging params
         self.logging = SimpleNamespace(
-            use_wandb=False,        # Whether to use wandb
-            project_name='prob-icl', # Project name for wandb
-            log_every=100           # Log to wandb every this many steps
+            use_wandb=False,                # Whether to use wandb
+            project_name='Sinusoidal-ICL',  # Project name for wandb
+            log_every=100                   # Log to wandb every this many steps
         )
         
         # Output params
-        self.output_dir = 'runs'    # Output directory for logs and checkpoints
+        self.output_dir = 'experiments'    # Output directory for logs and checkpoints
     
     @classmethod
     def load(cls, path):
         """Load configuration from YAML file."""
         config = cls()
         if not os.path.exists(path):
-            print(f"Warning: Config file {path} not found. Using defaults.")
-            return config
-        
+            raise FileNotFoundError(f"Config file {path} not found.")        
         with open(path, 'r') as f:
             yaml_config = yaml.safe_load(f)
         
@@ -130,7 +131,6 @@ class Config:
             
             section_config = getattr(config, section)
             
-            # Check if params is a dictionary before trying to iterate over it
             if params is not None and isinstance(params, dict):
                 for key, value in params.items():
                     # Special case for learning_rate - always convert to float
@@ -142,21 +142,50 @@ class Config:
                     # Try to convert string numeric values to proper numeric types
                     elif isinstance(value, str):
                         try:
-                            # Try to convert to float (handles both regular decimals and scientific notation)
                             value = float(value)
-                            # Convert to int if it's a whole number
                             if value.is_integer():
                                 value = int(value)
                         except ValueError:
-                            # If conversion fails, keep as string
-                            pass
-                    
+                            pass                    
                     setattr(section_config, key, value)
             elif params is not None:
-                # Handle case where params is a string or other non-dict value
+                # Handle case where params is a string, like output_dir
                 setattr(config, section, params)
         
         return config
+
+    def update_from_args(self, additional: List) -> None:
+        """
+        Update configuration from command line arguments.
+        """
+        sections = self.__dict__.keys()
+        key = None
+        for arg in additional:
+            if arg.startswith('--'):
+                assert key is None, f"Argument {key} without a value."
+                key = arg.lstrip('--')
+            else:
+                assert key is not None, f"Value {arg} without a key."
+                try:
+                    value = ast.literal_eval(arg)
+                except ValueError:
+                    value = arg
+                if '.' in key:
+                    section, key = key.split('.')
+                    assert section in sections, f"Section {section} not found."
+                    assert hasattr(getattr(self, section) , key), (
+                        f"Key {key} not found in section {section}."
+                    )
+                else:
+                    section = next((s for s in sections if hasattr(getattr(self, s), key)), None)
+                    assert section is not None, f"Section for key {key} not found."
+                
+                setattr(getattr(self, section) , key, value)
+                print(f"--> update_from_args() {section}.{key} = {value}")
+                key = None
+
+        if key is not None:
+            raise ValueError(f"Argument {key} without a value.")               
     
     def save(self, path):
         """Save configuration to YAML file."""
@@ -189,3 +218,7 @@ class Config:
     def copy(self):
         """Create a deep copy of the config."""
         return copy.deepcopy(self)
+
+    def __repr__(self):
+        print("--> Current experiment configuration:")
+        return f"Config(model={self.model}, training={self.training}, task={self.task}, logging={self.logging})"
