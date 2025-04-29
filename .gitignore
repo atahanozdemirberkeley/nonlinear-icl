@@ -35,9 +35,9 @@ ENV/
 .DS_Store
 Thumbs.db
 
-eval_results/
 experiments/
 outputs/
+eval_results/
 
 
 # Wandb

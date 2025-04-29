@@ -50,7 +50,7 @@ def compute_loss_all_prefixes(model, xs, ys, config):
     # Ensure ys has shape (B, L, 1)
     if ys.dim() == 2:
         ys = ys.unsqueeze(-1)
-
+        
     losses = []
     model_type = getattr(config.model, "model_type", "gpt2")
     seq_len = xs.shape[1]
@@ -150,6 +150,15 @@ def train_model(config):
     # d_token is the input token dimension, and this is different from the d_model.
     # we will have a learnable lienar projection from d_token to d_model (> d_token)
     # d_token is n_dims + 1, becuase it is concat. of input (n_dims) and output (1)
+    # Print task config info
+    if config.task.name == 'kernel_rff':
+        rff_dim = getattr(config.task, 'rff_dim', 128)
+        lengthscale = getattr(config.task, 'lengthscale', 1.0)
+        print(f"Task: {config.task.name} with {rff_dim} random Fourier features, lengthscale={lengthscale}")
+    else:
+        print(f"Task: {config.task.name}, scale={getattr(config.task, 'task_scale', 0.25)}")
+    
+    # Calculate d_token if not specified
     if config.model.d_token is None:
         config.model.d_token = config.model.n_dims + 1
     assert config.model.d_token == config.model.n_dims + 1, "d_token should be n_dims + 1"
@@ -208,6 +217,37 @@ def train_model(config):
     task_sampler = TaskSampler(config)
     val_tasks = [task_sampler() for _ in range(config.training.n_val_tasks)]
 
+    val_tasks = []
+    
+    # Prepare task_kwargs for validation tasks
+    val_task_kwargs = {
+        "scale": getattr(config.task, 'task_scale', 0.25)
+    }
+    
+    # Add task-specific parameters for validation
+    if config.task.name == 'kernel_rff':
+        val_task_kwargs["lengthscale"] = getattr(config.task, 'lengthscale', 1.0)
+        val_task_kwargs["rff_dim"] = getattr(config.task, 'rff_dim', 128)
+    
+    val_task_sampler = get_task_sampler(
+        config.task.name, 
+        config.model.n_dims, 
+        config.training.batch_size,
+        **val_task_kwargs
+    )
+    
+    for i in range(config.training.n_val_tasks):
+        try:
+            # Each validation task gets a completely random distribution
+            val_task = val_task_sampler()
+            val_tasks.append(val_task)
+        except Exception as e:
+            print(f"Error creating validation task {i}: {e}")
+    
+    # Create curriculum
+    curriculum = Curriculum(config)
+    print(f"Using {curriculum.n_points} points for all training, curriculum on dimensions: {curriculum.min_dims} → {curriculum.max_dims}")
+    
     # Training state
     curriculum = Curriculum(config)
     starting_step = 0
@@ -217,7 +257,26 @@ def train_model(config):
     steps = []
      
     # Training loop
-    pbar = tqdm(range(starting_step, config.training.train_steps))
+    # Use tqdm with appropriate options for terminal output
+    pbar = tqdm(
+        range(starting_step, config.training.train_steps), 
+        desc=f"Training {config.task.name}", 
+        ncols=100,
+        leave=True,
+        position=0,
+        dynamic_ncols=True
+    )
+    
+    # Pre-create task_kwargs for training
+    task_kwargs = {
+        "scale": getattr(config.task, 'task_scale', 0.25),
+        "num_tasks": getattr(config.training, 'pool_size', None)  # Support task pools
+    }
+    
+    # Add task-specific parameters
+    if config.task.name == 'kernel_rff':
+        task_kwargs["lengthscale"] = getattr(config.task, 'lengthscale', 1.0)
+        task_kwargs["rff_dim"] = getattr(config.task, 'rff_dim', 128)
     
     for step in pbar:
         model.train()
@@ -238,6 +297,13 @@ def train_model(config):
 
         current_config = config.update_from_args(curriculum.
         import pdb; pdb.set_trace()        
+        # Get task sampler for current curriculum dimensions - only create once per step
+        task_sampler = get_task_sampler(
+            config.task.name, 
+            curriculum.n_dims_truncated,
+            config.training.batch_size,
+            **task_kwargs
+        )
         
         # Handle seeds like in the original repo
         task_args = {}
@@ -254,9 +320,6 @@ def train_model(config):
         xs, ys = task.sample(config.training.batch_size, curriculum.n_points)
         xs, ys = xs.to(device), ys.to(device)
         
-        # Create prompt sequence for in-context learning
-        prompt_seq = create_prompt_sequence(xs, ys, config)
-
         # Forward pass and compute loss
         optimizer.zero_grad()
         loss = compute_loss_all_prefixes(model, xs, ys, config)
@@ -283,7 +346,7 @@ def train_model(config):
             })
         
         # Update progress bar
-        pbar.set_description(f"loss {loss.item():.6f}, dims {curriculum.n_dims_truncated}")
+        pbar.set_postfix({"loss": f"{loss.item():.6f}", "dims": curriculum.n_dims_truncated})
         
         # Validation and checkpoint saving
         if step % config.training.eval_every == 0 or step == config.training.train_steps - 1:
@@ -315,7 +378,7 @@ def train_model(config):
             val_losses.append(avg_val_loss)
             
             # Log validation results
-            print(f"Step {step}, Val Loss: {avg_val_loss:.6f}")
+            print(f"\nStep {step}, Val Loss: {avg_val_loss:.6f}")
             
             if config.logging.use_wandb:
                 wandb.log({

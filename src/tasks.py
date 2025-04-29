@@ -259,6 +259,36 @@ class TaskSampler:
 #         # Reset random state if we changed it
 #         if prev_state is not None:
 #             torch.set_rng_state(prev_state)
+# Returns:
+#      A function that creates task instances
+#    """
+ #   # Create pool dict if num_tasks is provided
+#     pool_dict = None
+#     if num_tasks is not None:
+#         if task_name == "linear":
+#             pool_dict = LinearRegression.generate_pool_dict(n_dims, num_tasks)
+        
+#     if task_name == 'kernel_rff':
+#         # Respect provided rff_dim without fallback to 128
+#         D = rff_dim if rff_dim is not None else max(128, n_dims)
+#         # Print only once during initialization
+#         print(f"Using {D} random Fourier features with lengthscale={lengthscale}")
+#         # Generate a single RFF mapping for all tasks
+#         # weight ~ N(0, 1/lengthscale^2)
+#         phi_weight = torch.randn(D, n_dims) / lengthscale
+#         phi_bias = torch.rand(D) * 2 * math.pi
+#         pool_dict = {'phi_weight': phi_weight, 'phi_bias': phi_bias}
+    
+#     def task_sampler(seed=None, seeds=None):
+#         task_args = {
+#             "n_dims": n_dims,
+#             "batch_size": batch_size,
+#             "scale": scale,
+#         }
+        
+#         # Add pool_dict for tasks that need it (linear and kernel_rff)
+#         if pool_dict is not None and (task_name == "linear" or task_name == "kernel_rff"):
+#             task_args["pool_dict"] = pool_dict 
         
 #         # Set seed for outputs if provided
 #         if ys_seeds is not None:
