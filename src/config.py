@@ -2,11 +2,12 @@
 import argparse
 import ast
 import os
-import yaml
+import copy
 from dataclasses import dataclass, asdict, field
 from types import SimpleNamespace
-from typing import List, Optional
-import copy
+from typing import List, Optional, Union, Dict
+
+import yaml
 
 @dataclass
 class ModelConfig:
@@ -154,38 +155,52 @@ class Config:
         
         return config
 
-    def update_from_args(self, additional: List) -> None:
+    def update_from_args(self, additional: Union[List, Dict]) -> None:
         """
         Update configuration from command line arguments.
         """
         sections = self.__dict__.keys()
-        key = None
-        for arg in additional:
-            if arg.startswith('--'):
-                assert key is None, f"Argument {key} without a value."
-                key = arg.lstrip('--')
-            else:
-                assert key is not None, f"Value {arg} without a key."
-                try:
-                    value = ast.literal_eval(arg)
-                except ValueError:
-                    value = arg
-                if '.' in key:
-                    section, key = key.split('.')
-                    assert section in sections, f"Section {section} not found."
-                    assert hasattr(getattr(self, section) , key), (
-                        f"Key {key} not found in section {section}."
-                    )
+        if isinstance(additional, list):
+            key = None
+            for arg in additional:
+                if arg.startswith('--'):
+                    assert key is None, f"Argument {key} without a value."
+                    key = arg.lstrip('--')
                 else:
-                    section = next((s for s in sections if hasattr(getattr(self, s), key)), None)
-                    assert section is not None, f"Section for key {key} not found."
-                
-                setattr(getattr(self, section) , key, value)
-                print(f"--> update_from_args() {section}.{key} = {value}")
-                key = None
+                    assert key is not None, f"Value {arg} without a key."
+                    try:
+                        value = ast.literal_eval(arg)
+                    except ValueError:
+                        value = arg
+                    if '.' in key:
+                        section, key = key.split('.')
+                        assert section in sections, f"Section {section} not found."
+                        assert hasattr(getattr(self, section) , key), (
+                            f"Key {key} not found in section {section}."
+                        )
+                    else:
+                        section = next((s for s in sections if hasattr(getattr(self, s), key)), None)
+                        assert section is not None, f"Section for key {key} not found."
+                    
+                    setattr(getattr(self, section) , key, value)
+                    print(f"--> update_from_args() {section}.{key} = {value}")
+                    key = None
 
-        if key is not None:
-            raise ValueError(f"Argument {key} without a value.")               
+            if key is not None:
+                raise ValueError(f"Argument {key} without a value.")     
+
+        elif isinstance(additional, dict):
+            for key, value in additional.items():
+                value_set = False
+                for section in sections:
+                    if hasattr(getattr(self, section), key):
+                        setattr(getattr(self, section), key, value)
+                        print(f"--> update_from_args() {section}.{key} = {value}")
+                        value_set = True
+                        break
+                assert value_set, f"Key {key} not found in any section."
+        else:
+            raise TypeError("additional must be a list or a dictionary.")
     
     def save(self, path):
         """Save configuration to YAML file."""

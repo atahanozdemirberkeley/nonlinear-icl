@@ -81,26 +81,22 @@ def compute_loss_all_prefixes(model, xs, ys, config):
 class Curriculum:
     """Curriculum learning for gradually increasing task difficulty (dimensions only)."""
     def __init__(self, config):
-        self.min_dims = config.training.min_dims
-        self.max_dims = config.model.n_dims
-        
-        # Always use full number of positions (no curriculum on points)
-        self.n_points = config.model.n_positions
-        
-        # Current curriculum state for dimensions
-        self.n_dims_truncated = self.min_dims
-        
-        # Curriculum schedule
-        self.total_steps = config.training.train_steps
-        self.dim_schedule = config.training.dim_schedule  # % of training to reach max dims
+        self._min_dims = config.training.min_dims
+        self._max_dims = config.model.n_dims
+        self.n_dims = self._min_dims
+        self._total_steps = config.training.train_steps
+        # get the maximum at total_steps * dim_schedule
+        self._dim_schedule = config.training.dim_schedule
     
     def update(self, step):
         """Update curriculum based on current step (only for dimensions)."""
         # Update number of dimensions
-        if self.dim_schedule > 0:
-            dim_progress = min(1.0, step / (self.total_steps * self.dim_schedule))
-            self.n_dims_truncated = min(self.max_dims, 
-                                    int(self.min_dims + (self.max_dims - self.min_dims) * dim_progress))
+        if self._dim_schedule > 0:
+            dim_progress = min(1.0, step / (self._total_steps * self._dim_schedule))
+            self.n_dims = min(
+                self._max_dims, 
+                int(self._min_dims + (self._max_dims - self._min_dims) * dim_progress)
+            )
 
 def sample_seeds(total_seeds, count):
     """Sample unique random seeds from 0 to total_seeds-1."""
@@ -169,7 +165,7 @@ def train_model(config):
             n_heads=config.model.n_heads,
             n_layer=config.model.n_layer,
         ).to(device)
-        print(f"--> train_model(): Using GPT2-style model with {n_layer} layers")
+        print(f"--> train_model(): Using GPT2-style model with {config.model.n_layer} layers")
 
     elif model_type == "custom_transformer":
         model = CustomICLModel(
@@ -211,50 +207,37 @@ def train_model(config):
     print(f"Creating {config.training.n_val_tasks} validation tasks with {config.model.n_dims} dimensions")
     task_sampler = TaskSampler(config)
     val_tasks = [task_sampler() for _ in range(config.training.n_val_tasks)]
-    import pdb; pdb.set_trace()
-
-    # Create curriculum
-    curriculum = Curriculum(config)
-    print(f"Using {curriculum.n_points} points for all training, curriculum on dimensions: {curriculum.min_dims} → {curriculum.max_dims}")
 
     # Training state
+    curriculum = Curriculum(config)
     starting_step = 0
     best_val_loss = float('inf')
     train_losses = []
     val_losses = []
     steps = []
-    
-    # Number of unique distributions to use during training (if limited)
-    num_unique_distributions = getattr(config.training, 'num_unique_distributions', None)
-    # For backward compatibility
-    if num_unique_distributions is None:
-        num_unique_distributions = getattr(config.training, 'num_training_examples', None)
-        if num_unique_distributions is not None:
-            print(f"Warning: 'num_training_examples' is deprecated, use 'num_unique_distributions' instead")
-    
+     
     # Training loop
     pbar = tqdm(range(starting_step, config.training.train_steps))
     
     for step in pbar:
         model.train()
         
-        # Get task sampler for current curriculum dimensions
-        task_kwargs = {
-            "scale": getattr(config.task, 'task_scale', 0.25),
-            "num_tasks": getattr(config.training, 'pool_size', None)  # Support task pools
-        }
+        # # Get task sampler for current curriculum dimensions
+        # task_kwargs = {
+        #     "scale": getattr(config.task, 'task_scale', 0.25),
+        #     "num_tasks": getattr(config.training, 'pool_size', None)  # Support task pools
+        # }
         
-        # Add task-specific parameters
-        if config.task.name == 'kernel_rff':
-            task_kwargs["lengthscale"] = getattr(config.task, 'lengthscale', 1.0)
-            task_kwargs["rff_dim"] = getattr(config.task, 'rff_dim', 128)
+        # # Add task-specific parameters
+        # if config.task.name == 'kernel_rff':
+        #     task_kwargs["lengthscale"] = getattr(config.task, 'lengthscale', 1.0)
+        #     task_kwargs["rff_dim"] = getattr(config.task, 'rff_dim', 128)
         
-        task_sampler = get_task_sampler(
-            config.task.name, 
-            curriculum.n_dims_truncated,
-            config.training.batch_size,
-            **task_kwargs
-        )
+        import pdb; pdb.set_trace()
+        # get attributes from config, except for those starting with "_"
+
+        current_config = config.update_from_args(curriculum.
+        import pdb; pdb.set_trace()        
         
         # Handle seeds like in the original repo
         task_args = {}
