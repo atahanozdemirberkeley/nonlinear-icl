@@ -284,13 +284,14 @@ class GPT2ICLModel(nn.Module):
         
         # Project input to d_model dimension
         x = self.input_proj(x)
+        # x = x + self._backbone.wpe.weight[:seq_len, :]
         
         # Apply GPT2 model
         output = self._backbone(inputs_embeds=x).last_hidden_state
         
         # Project to scalar predictions
         predictions = self.output_proj(output).squeeze(-1)
-        
+        import pdb; pdb.set_trace()
         return predictions
 
 

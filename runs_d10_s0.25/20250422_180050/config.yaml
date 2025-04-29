@@ -1,0 +1,27 @@
+logging:
+  log_every: 100
+  project_name: Sinusoidal-ICL
+  use_wandb: false
+model:
+  d_model: 128
+  d_token: null
+  kernel_type: relu
+  n_dims: 10
+  n_heads: 4
+  n_positions: 10
+task:
+  name: gaussian
+  task_scale: 0.25
+training:
+  batch_size: 64
+  dim_schedule: 0.5
+  eval_every: 500
+  grad_clip: 1.0
+  learning_rate: 0.0005
+  min_dims: 5
+  min_points: 10
+  n_val_tasks: 10
+  num_unique_distributions: null
+  point_schedule: 0
+  save_every: 1000
+  train_steps: 10000

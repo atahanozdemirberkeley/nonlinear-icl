@@ -12,8 +12,11 @@ import torch.nn.functional as F
 import random
 
 from model import GPT2ICLModel
-from tasks import get_task, get_task_sampler
+from custom_model import CustomICLModel
+from tasks import TaskSampler
 from config import Config
+from utils import set_random_seed
+
 
 def create_prompt_sequence(xs, ys, config):
     """Create prompt sequence for the model."""
@@ -36,7 +39,7 @@ def create_prompt_sequence(xs, ys, config):
     else:
         # Simple concatenation if no additional padding needed
         prompt_seq = torch.cat([xs, ys], dim=2)
-    
+
     return prompt_seq
 
 def compute_loss_all_prefixes(model, xs, ys, config):
@@ -47,7 +50,7 @@ def compute_loss_all_prefixes(model, xs, ys, config):
     # Ensure ys has shape (B, L, 1)
     if ys.dim() == 2:
         ys = ys.unsqueeze(-1)
-
+        
     losses = []
     model_type = getattr(config.model, "model_type", "gpt2")
     seq_len = xs.shape[1]
@@ -78,26 +81,22 @@ def compute_loss_all_prefixes(model, xs, ys, config):
 class Curriculum:
     """Curriculum learning for gradually increasing task difficulty (dimensions only)."""
     def __init__(self, config):
-        self.min_dims = config.training.min_dims
-        self.max_dims = config.model.n_dims
-        
-        # Always use full number of positions (no curriculum on points)
-        self.n_points = config.model.n_positions
-        
-        # Current curriculum state for dimensions
-        self.n_dims_truncated = self.min_dims
-        
-        # Curriculum schedule
-        self.total_steps = config.training.train_steps
-        self.dim_schedule = config.training.dim_schedule  # % of training to reach max dims
+        self._min_dims = config.training.min_dims
+        self._max_dims = config.model.n_dims
+        self.n_dims = self._min_dims
+        self._total_steps = config.training.train_steps
+        # get the maximum at total_steps * dim_schedule
+        self._dim_schedule = config.training.dim_schedule
     
     def update(self, step):
         """Update curriculum based on current step (only for dimensions)."""
         # Update number of dimensions
-        if self.dim_schedule > 0:
-            dim_progress = min(1.0, step / (self.total_steps * self.dim_schedule))
-            self.n_dims_truncated = min(self.max_dims, 
-                                    int(self.min_dims + (self.max_dims - self.min_dims) * dim_progress))
+        if self._dim_schedule > 0:
+            dim_progress = min(1.0, step / (self._total_steps * self._dim_schedule))
+            self.n_dims = min(
+                self._max_dims, 
+                int(self._min_dims + (self._max_dims - self._min_dims) * dim_progress)
+            )
 
 def sample_seeds(total_seeds, count):
     """Sample unique random seeds from 0 to total_seeds-1."""
@@ -106,30 +105,51 @@ def sample_seeds(total_seeds, count):
         seeds.add(random.randint(0, total_seeds - 1))
     return list(seeds)
 
+
 def train_model(config):
-    """Train an in-context learning model with curriculum learning."""
-    # No global seed setting - each run will use different random distributions
-    print("Random seeds enabled - each run will use different random distributions")
-    
-    # Create output directory
-    output_dir = os.path.join(config.output_dir, datetime.now().strftime("%Y%m%d_%H%M%S"))
+    """
+    Train an in-context learning model with curriculum learning.
+    """
+
+    set_random_seed(config.training.seed)
+    print("--> train_model(): Random seed to ", config.training.seed)
+
+    output_dir = os.path.join(
+        config.output_dir,
+        datetime.now().strftime("%Y%m%d_%H%M%S")
+    )
     os.makedirs(output_dir, exist_ok=True)
-    
-    # Save config with all parameters
+    print("--> train_model(): Output directory: ", output_dir)
     config.save(os.path.join(output_dir, "config.yaml"))
+    print("--> train_model(): Config saved to ", os.path.join(output_dir, "config.yaml"))
     
-    # Initialize wandb if enabled
     if config.logging.use_wandb:
+        assert os.environ.get("WANDB_API_KEY", None) is not None, (
+            "Please set the WANDB_API_KEY environment variable to use wandb logging. "
+            "You can get your API key from https://wandb.ai/"
+        )
         wandb.init(
             project=config.logging.project_name,
             config=vars(config),
-            name=f"{config.task.name}_d{config.model.n_dims}_n{config.model.n_positions}"
+            name= (
+                f"task={config.task.name}_scale={config.task.task_scale}_"
+                f"xrange={config.task.x_range}_freqmin={config.task.freq_min}_"
+                f"freqmax={config.task.freq_max}_nlayer={config.model.n_layer}_"
+                f"npos={config.model.n_positions}_ndims={config.model.n_dims}_"
+                f"dmodel={config.model.d_model}_nheads={config.model.n_heads}_"
+                f"lr={config.training.learning_rate}_batch={config.training.batch_size}_"
+                f"trainsteps={config.training.train_steps}"
+            ),
         )
-    
-    # Set device
+    else:
+        print("--> train_model(): Wandb logging is disabled. Set --logging.use_wandb True")
+
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(f"Using device: {device}")
+    print(f"--> train_model(): using device {device}")
     
+    # d_token is the input token dimension, and this is different from the d_model.
+    # we will have a learnable lienar projection from d_token to d_model (> d_token)
+    # d_token is n_dims + 1, becuase it is concat. of input (n_dims) and output (1)
     # Print task config info
     if config.task.name == 'kernel_rff':
         rff_dim = getattr(config.task, 'rff_dim', 128)
@@ -141,48 +161,62 @@ def train_model(config):
     # Calculate d_token if not specified
     if config.model.d_token is None:
         config.model.d_token = config.model.n_dims + 1
+    assert config.model.d_token == config.model.n_dims + 1, "d_token should be n_dims + 1"
     
-    # Create model based on model_type
-    model_type = getattr(config.model, 'model_type', 'gpt2')
-    
-    if model_type == 'gpt2':
-        # Get number of layers from config or use default of 12
-        n_layer = getattr(config.model, 'n_layer', 12)
-        
+    # Load the model
+    model_type = getattr(config.model, 'model_type', None)
+    assert model_type is not None, "Model type must be specified in the config."
+    if model_type == 'gpt2':        
         model = GPT2ICLModel(
             d_token=config.model.d_token,
             n_positions=config.model.n_positions,
             d_model=config.model.d_model,
             n_heads=config.model.n_heads,
-            n_layer=n_layer
+            n_layer=config.model.n_layer,
         ).to(device)
-        print(f"Using GPT2-style model with {n_layer} layers")
+        print(f"--> train_model(): Using GPT2-style model with {config.model.n_layer} layers")
+
+    elif model_type == "custom_transformer":
+        model = CustomICLModel(
+            d_token=config.model.d_token,
+            d_model=config.model.d_model,
+            d_ff=4*config.model.d_model,
+            n_layers=config.model.n_layer,
+            n_head=config.model.n_heads,
+            d_qkv=config.model.d_model // config.model.n_heads,
+            dropout_attn=config.model.dropout_attn,
+            dropout_ffn=config.model.dropout_ffn,
+            nonlin="SiLU",
+        ).to(device)
+        print(f"--> train_model(): Using custom transformer model.")
+
     elif model_type == 'mlp':
-        # Import MLPICLModel
         from model import MLPICLModel
-        
-        # Get MLP-specific parameters
         hidden_dim = getattr(config.model, 'hidden_dim', 256)
-        n_layers = getattr(config.model, 'n_layers', 4)
-        
+        n_layers = getattr(config.model, 'n_layers', 4)        
         model = MLPICLModel(
             d_token=config.model.d_token,
             n_positions=config.model.n_positions,
             hidden_dim=hidden_dim,
             n_layers=n_layers
         ).to(device)
-        print(f"Using MLP model with {n_layers} layers and {hidden_dim} hidden dimensions")
+        print(f"--> train_model(): Using MLP model with {n_layers} layers and {hidden_dim} hidden dimensions")
+
     else:
-        raise ValueError(f"Unknown model type: {model_type}")
+        raise ValueError(f"--> train_model(): Unknown model type {model_type}")
     
     print(f"Model has {sum(p.numel() for p in model.parameters()):,} parameters")
-    
+
     # Initialize optimizer
     learning_rate = float(config.training.learning_rate)
-    optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
-    
+    weight_decay = float(config.training.weight_decay) if hasattr(config.training, 'weight_decay') else 0.0
+    optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate, weight_decay=weight_decay)
+
     # Create validation tasks using task_sampler
     print(f"Creating {config.training.n_val_tasks} validation tasks with {config.model.n_dims} dimensions")
+    task_sampler = TaskSampler(config)
+    val_tasks = [task_sampler() for _ in range(config.training.n_val_tasks)]
+
     val_tasks = []
     
     # Prepare task_kwargs for validation tasks
@@ -215,20 +249,13 @@ def train_model(config):
     print(f"Using {curriculum.n_points} points for all training, curriculum on dimensions: {curriculum.min_dims} → {curriculum.max_dims}")
     
     # Training state
+    curriculum = Curriculum(config)
     starting_step = 0
     best_val_loss = float('inf')
     train_losses = []
     val_losses = []
     steps = []
-    
-    # Number of unique distributions to use during training (if limited)
-    num_unique_distributions = getattr(config.training, 'num_unique_distributions', None)
-    # For backward compatibility
-    if num_unique_distributions is None:
-        num_unique_distributions = getattr(config.training, 'num_training_examples', None)
-        if num_unique_distributions is not None:
-            print(f"Warning: 'num_training_examples' is deprecated, use 'num_unique_distributions' instead")
-    
+     
     # Training loop
     # Use tqdm with appropriate options for terminal output
     pbar = tqdm(
@@ -254,6 +281,22 @@ def train_model(config):
     for step in pbar:
         model.train()
         
+        # # Get task sampler for current curriculum dimensions
+        # task_kwargs = {
+        #     "scale": getattr(config.task, 'task_scale', 0.25),
+        #     "num_tasks": getattr(config.training, 'pool_size', None)  # Support task pools
+        # }
+        
+        # # Add task-specific parameters
+        # if config.task.name == 'kernel_rff':
+        #     task_kwargs["lengthscale"] = getattr(config.task, 'lengthscale', 1.0)
+        #     task_kwargs["rff_dim"] = getattr(config.task, 'rff_dim', 128)
+        
+        import pdb; pdb.set_trace()
+        # get attributes from config, except for those starting with "_"
+
+        current_config = config.update_from_args(curriculum.
+        import pdb; pdb.set_trace()        
         # Get task sampler for current curriculum dimensions - only create once per step
         task_sampler = get_task_sampler(
             config.task.name, 
@@ -407,65 +450,22 @@ def train_model(config):
     return model, output_dir
 
 def main():
-    parser = argparse.ArgumentParser(description="Train ICL model for probability distributions")
-    parser.add_argument('--config', type=str, default='configs/default.yaml', help='Path to config file')
-    parser.add_argument('--task_name', type=str, help='Override task name from config')
-    parser.add_argument('--n_dims', type=int, help='Override input dimensions')
-    parser.add_argument('--task_scale', type=float, help='Override task scale parameter')
-    parser.add_argument('--steps', type=int, help='Override number of training steps')
-    parser.add_argument('--min_dims', type=int, help='Override minimum dimensions for curriculum')
-    parser.add_argument('--dim_schedule', type=float, help='Override dimension schedule (0 to disable)')
-    parser.add_argument('--x_range', type=float, help='Override x range for sinusoidal tasks')
-    parser.add_argument('--freq_min', type=float, help='Override minimum frequency for sinusoidal tasks')
-    parser.add_argument('--freq_max', type=float, help='Override maximum frequency for sinusoidal tasks')
+    parser = argparse.ArgumentParser(description="Train ICL model")
+    parser.add_argument('--config', type=str, default='configs/default.yaml', help='Path to config file')    
+    args, additional = parser.parse_known_args()
     
-    args = parser.parse_args()
-    
-    # Load configuration from file
+    # Load configuration from file and override with CLI arguments
     config = Config.load(args.config)
     print(f"Loaded configuration from {args.config}")
-    
-    # Override parameters if provided
-    if args.task_name:
-        config.task.name = args.task_name
-    
-    if args.n_dims:
-        config.model.n_dims = args.n_dims
-        # Update d_token to match dimensions
-        config.model.d_token = config.model.n_dims + 1
-    
-    if args.task_scale:
-        config.task.task_scale = args.task_scale
-    
-    if args.steps:
-        config.training.train_steps = args.steps
-    
-    if args.min_dims:
-        config.training.min_dims = args.min_dims
-    
-    if args.dim_schedule is not None:
-        config.training.dim_schedule = args.dim_schedule
-    
-    # Process sinusoidal task specific parameters
-    if args.x_range:
-        config.task.x_range = args.x_range
-    
-    if args.freq_min:
-        config.task.freq_min = args.freq_min
-    
-    if args.freq_max:
-        config.task.freq_max = args.freq_max
+    config.update_from_args(additional)
     
     # Always use full position length (k+1) to match the mathematical objective
     config.training.min_points = config.model.n_positions
     config.training.point_schedule = 0
     print(f"Using full sequence length of {config.model.n_positions} positions for all training")
     
-    # Update output directory to include task-specific parameters
-    base_output_dir = config.output_dir
-    
-    # Add dimensions to output directory name
-    output_dir = f"{base_output_dir}_d{config.model.n_dims}"
+    # generate a model-specific and task-specific output directory
+    output_dir = f"{config.output_dir}_d{config.model.n_dims}"
     
     # Add task-specific parameters
     if config.task.name == "sinusoidal":
